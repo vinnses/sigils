@@ -10,15 +10,14 @@ _totp() {
     cword=$COMP_CWORD
 
     _totp_account_names() {
-        local script_dir keys
-        script_dir="$(cd "$(dirname "$(readlink -f "$(command -v totp)")")/.." 2>/dev/null && pwd)"
-        keys="${script_dir}/data/keys"
-        [[ -f "$keys" ]] && awk -F'\t' 'NF >= 2 {print $1}' "$keys"
+        # Decrypt via the totp binary itself; safe in graphical sessions where
+        # the keyring is unlocked. Returns nothing silently in TTY sessions.
+        totp list 2>/dev/null | awk '/^[^ ]/ {print $0}'
     }
 
     # Complete commands at position 1
     if [[ $cword -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "add list get remove export --help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "init add list get remove export --help" -- "$cur") )
         return 0
     fi
 
