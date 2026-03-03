@@ -1,0 +1,790 @@
+#!/bin/bash
+# usb-auth — USB hardware authentication token configuration
+#
+# Configures a dedicated USB pendrive as a hardware auth token for Linux:
+#   1. pam_usb — session auth via USB presence, lock on removal
+#   2. Keyring — GNOME Keyring unlock via split-knowledge LUKS architecture
+
+set -euo pipefail
+
+SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CONF_FILE="${SPELL_DIR}/config/usb-auth.conf"
+LOG_FILE="${SPELL_DIR}/logs/setup.log"
+
+source "${SPELL_DIR}/lib/common.sh"
+source "${SPELL_DIR}/lib/partition.sh"
+source "${SPELL_DIR}/lib/pam.sh"
+source "${SPELL_DIR}/lib/keyring.sh"
+source "${SPELL_DIR}/lib/sudoers.sh"
+
+# ─── Usage ───────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+Usage: usb-auth <subcommand> [options]
+
+Subcommands:
+  setup              Full interactive wizard (all steps)
+  setup-pam          pam_usb setup only (device registration, PAM files, lock/unlock)
+  setup-keyring      Keyring LUKS setup only (keyfile, provisioning, autostart)
+  partition          Partition analysis and modification only
+
+  status             Show current state of all subsystems
+  test               Run diagnostics (pamusb-check, LUKS cycle, sudoers, udev)
+  recover            Reset pam_usb OTP pads after desynchronization
+
+  rekey              Update keyring password stored in LUKS payload
+  provision-host     Add keyring payload for a new hostname on the same USB
+
+  lock-disable       Temporarily disable session lock on USB removal
+  lock-enable        Re-enable session lock udev rule
+
+  uninstall          Full teardown with per-step confirmation
+
+Options:
+  -h, --help         Show this help
+  --debug            Enable verbose debug logging
+  --log <file>       Write log to <file> (default: ${LOG_FILE})
+
+Examples:
+  usb-auth setup
+  usb-auth status
+  usb-auth test
+  usb-auth recover
+  usb-auth rekey
+  usb-auth provision-host
+  usb-auth lock-disable
+  usb-auth uninstall
+EOF
+}
+
+# ─── Setup wizard ─────────────────────────────────────────────────────────────
+
+_wizard_step1_device() {
+    print_step 1 10 "Device Detection"
+
+    local devices=()
+    local device_lines=()
+
+    while IFS= read -r line; do
+        local name model serial size
+        name=$(echo "$line" | jq -r '.name // "?"')
+        model=$(echo "$line" | jq -r '.model // "unknown"')
+        serial=$(echo "$line" | jq -r '.serial // "unknown"')
+        size=$(echo "$line" | jq -r '.size // "?"')
+        devices+=("/dev/${name}")
+        device_lines+=("/dev/${name}  ${model}  serial:${serial}  ${size}")
+    done < <(lsblk --json -o NAME,MODEL,SERIAL,SIZE,TYPE,RM 2>/dev/null \
+        | jq -c '.blockdevices[] | select(.rm == true and .type == "disk")')
+
+    if [[ ${#devices[@]} -eq 0 ]]; then
+        log_fatal "No removable block devices found. Connect the USB pendrive and retry."
+        exit 1
+    fi
+
+    print_section "Available removable devices"
+    local selected_line
+    menu_select selected_line "${device_lines[@]}"
+    USB_DEVICE="${selected_line%% *}"
+
+    log_info "Selected: $USB_DEVICE"
+
+    if ! usb_validate_device "$USB_DEVICE"; then
+        exit 1
+    fi
+
+    # Get device info
+    local devname="${USB_DEVICE#/dev/}"
+    USB_DEVICE_MODEL=$(lsblk --nodeps --noheadings -o MODEL "$USB_DEVICE" 2>/dev/null | xargs)
+    USB_DEVICE_SERIAL=$(lsblk --nodeps --noheadings -o SERIAL "$USB_DEVICE" 2>/dev/null | xargs)
+
+    conf_set "USB_DEVICE_PATH" "$USB_DEVICE"
+    conf_set "USB_DEVICE_SERIAL" "$USB_DEVICE_SERIAL"
+    conf_set "USB_DEVICE_MODEL" "$USB_DEVICE_MODEL"
+
+    print_ok "Device: $USB_DEVICE ($USB_DEVICE_MODEL, serial: $USB_DEVICE_SERIAL)"
+    conf_mark_step 1
+}
+
+_wizard_step2_analyze() {
+    print_step 2 10 "Partition Analysis"
+    partition_print_layout "$USB_DEVICE"
+    conf_mark_step 2
+}
+
+_wizard_step3_plan() {
+    print_step 3 10 "Partition Plan"
+
+    local existing_luks_uuid
+    existing_luks_uuid=$(conf_get "USB_LUKS_PARTITION_UUID")
+
+    local assessment
+    assessment=$(partition_assess "$USB_DEVICE" "$existing_luks_uuid")
+    PARTITION_STRATEGY="$assessment"
+
+    case "$assessment" in
+        has_luks)
+            print_ok "LUKS partition already exists (UUID: $existing_luks_uuid) — skipping partitioning"
+            LUKS_PARTITION=$(partition_find_luks "$USB_DEVICE")
+            conf_mark_step 4  # skip steps 3+4
+            return 0
+            ;;
+        virgin)
+            print_section "Virgin disk — recommended: create GPT with two partitions"
+            printf "  ${C_BOLD}Option A (recommended):${C_RESET} Create GPT table\n" >&2
+            printf "    • Partition 1: remaining space, vfat (for pam_usb .pad files)\n" >&2
+            printf "    • Partition 2: 128MiB at end, for LUKS (keyring payloads)\n" >&2
+            echo >&2
+            if confirm_yn "Proceed with Option A?"; then
+                PARTITION_PLAN="gpt_new"
+            else
+                log_info "Aborted — prepare the USB manually and re-run"
+                exit 0
+            fi
+            ;;
+        has_free)
+            local free_mib
+            free_mib=$(partition_free_at_end_mib "$USB_DEVICE")
+            print_section "Free space available at end of disk (${free_mib} MiB)"
+            printf "  ${C_BOLD}Option B (recommended):${C_RESET} Create LUKS partition in free space\n" >&2
+            printf "    Existing partitions are untouched.\n" >&2
+            echo >&2
+            if confirm_yn "Proceed with Option B?"; then
+                PARTITION_PLAN="use_free"
+            else
+                log_info "Aborted"
+                exit 0
+            fi
+            ;;
+        needs_resize)
+            print_section "No free space — must resize or delete the last partition"
+            printf "  ${C_BOLD}Option A:${C_RESET} Resize last partition (shrink by 128MiB, create LUKS in freed space)\n" >&2
+            printf "  ${C_BOLD}Option B:${C_RESET} Delete and recreate last partition 128MiB smaller\n" >&2
+            printf "  ${C_BOLD}Option C:${C_RESET} Manual — use GParted to prepare 128MiB free space, then re-run\n" >&2
+            echo >&2
+            local plan_choice
+            menu_select plan_choice \
+                "A — Resize last partition (keeps data, requires supported filesystem)" \
+                "B — Delete and recreate last partition (DATA LOST on that partition)" \
+                "C — Manual (exit and use GParted)"
+            case "${plan_choice:0:1}" in
+                A) PARTITION_PLAN="resize_last" ;;
+                B) PARTITION_PLAN="delete_recreate" ;;
+                C)
+                    printf "\nUse GParted or parted to free 128MiB at the end of %s.\n" "$USB_DEVICE" >&2
+                    printf "Then re-run: usb-auth partition\n\n" >&2
+                    exit 0
+                    ;;
+            esac
+
+            # Offer backup for resize/delete options
+            if confirm_yn "Backup the last partition contents before proceeding?"; then
+                local backup_dir
+                prompt_value "Backup destination directory" backup_dir "$HOME/usb-backup-$(date +%Y%m%d)"
+                local last_part
+                last_part=$(partition_find_luks "$USB_DEVICE")  # reuse to get last part
+                partition_backup_contents "$last_part" "$backup_dir"
+            fi
+            ;;
+    esac
+}
+
+_wizard_step4_partition() {
+    print_step 4 10 "Partition Execution"
+
+    log_warn "About to modify partition table on $USB_DEVICE"
+    if ! confirm_yes "Type 'yes' to proceed with partitioning"; then
+        log_info "Aborted"
+        exit 0
+    fi
+
+    local result=0
+    case "${PARTITION_PLAN:-}" in
+        gpt_new)       partition_create_gpt "$USB_DEVICE" 128 || result=1 ;;
+        use_free)      partition_create_in_free "$USB_DEVICE" 128 || result=1 ;;
+        resize_last)   partition_resize_last "$USB_DEVICE" 128 || result=1 ;;
+        delete_recreate) partition_delete_recreate_last "$USB_DEVICE" 128 || result=1 ;;
+        *)
+            log_error "Unknown partition plan: ${PARTITION_PLAN:-unset}"
+            result=1
+            ;;
+    esac
+
+    if [[ "$result" -ne 0 ]]; then
+        log_fatal "Partitioning failed. Do NOT retry automatically."
+        log_fatal "Inspect the disk with: parted $USB_DEVICE print"
+        log_fatal "Manual intervention may be required."
+        exit 1
+    fi
+
+    # Detect the new LUKS partition (last partition on device)
+    sleep 1
+    partprobe "$USB_DEVICE" 2>/dev/null || true
+    sleep 1
+
+    LUKS_PARTITION=$(partition_find_luks "$USB_DEVICE")
+    if [[ -z "$LUKS_PARTITION" ]]; then
+        log_fatal "Could not find LUKS partition after creation"
+        exit 1
+    fi
+
+    # Get main partition UUID
+    local main_part="${USB_DEVICE}1"
+    [[ "$USB_DEVICE" =~ [0-9]$ ]] && main_part="${USB_DEVICE}p1"
+    local main_uuid
+    main_uuid=$(usb_get_partition_uuid "$main_part")
+    conf_set "USB_MAIN_PARTITION_UUID" "$main_uuid"
+    conf_set "LUKS_PARTITION_DEVICE" "$LUKS_PARTITION"
+
+    print_ok "Partitioning complete. LUKS partition: $LUKS_PARTITION"
+    conf_mark_step 4
+}
+
+_wizard_step5_pam() {
+    print_step 5 10 "pam_usb Setup"
+
+    if ! pam_check_prerequisites; then
+        exit 1
+    fi
+
+    local device_name
+    device_name=$(conf_get "PAM_DEVICE_NAME" "")
+    if [[ -z "$device_name" ]]; then
+        prompt_value "Device name for pam_usb" device_name "authkey"
+        conf_set "PAM_DEVICE_NAME" "$device_name"
+    fi
+
+    local pam_user="${PAM_USER:-$USER}"
+    conf_set "PAM_USER" "$pam_user"
+
+    pam_add_device "$device_name" "$pam_user" || exit 1
+    pam_configure_all
+
+    local main_uuid
+    main_uuid=$(conf_get "USB_MAIN_PARTITION_UUID")
+
+    if [[ -n "$main_uuid" ]]; then
+        pam_install_guard "$pam_user" "$main_uuid"
+        pam_install_dispatch "$pam_user"
+        pam_install_udev_lock_rule "$main_uuid"
+    else
+        log_warn "USB_MAIN_PARTITION_UUID not set — skipping lock/unlock udev rule"
+        log_warn "Run 'usb-auth partition' first, or set manually in config"
+    fi
+
+    conf_mark_step 5
+}
+
+_wizard_step6_luks() {
+    print_step 6 10 "LUKS Setup"
+
+    LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
+    if [[ -z "$LUKS_PARTITION" ]]; then
+        log_error "LUKS partition device not configured. Run 'usb-auth partition' first."
+        exit 1
+    fi
+
+    conf_set "LUKS_KEYFILE" "/root/usb-luks.key"
+    conf_set "LUKS_MAPPER_NAME" "usb-secret"
+    conf_set "LUKS_MOUNT_BASE" "/run/user"
+
+    LUKS_KEYFILE="/root/usb-luks.key"
+    LUKS_MAPPER_NAME="usb-secret"
+
+    keyring_setup_keyfile || exit 1
+    keyring_luks_format "$LUKS_PARTITION" || exit 1
+
+    # Get LUKS UUID now that it's formatted
+    local luks_uuid
+    luks_uuid=$(blkid -s UUID -o value "$LUKS_PARTITION" 2>/dev/null)
+    conf_set "USB_LUKS_PARTITION_UUID" "$luks_uuid"
+
+    print_ok "LUKS UUID: $luks_uuid"
+    conf_mark_step 6
+}
+
+_wizard_step7_provision() {
+    print_step 7 10 "Keyring Provisioning"
+
+    LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE")
+    LUKS_KEYFILE=$(conf_get "LUKS_KEYFILE" "/root/usb-luks.key")
+    LUKS_MAPPER_NAME=$(conf_get "LUKS_MAPPER_NAME" "usb-secret")
+    LUKS_MOUNT_BASE=$(conf_get "LUKS_MOUNT_BASE" "/run/user")
+
+    keyring_provision "$LUKS_PARTITION" "$(hostname)" || exit 1
+    conf_mark_step 7
+}
+
+_wizard_step8_system() {
+    print_step 8 10 "System Integration"
+
+    local pam_user
+    pam_user=$(conf_get "PAM_USER" "$USER")
+    local luks_uuid
+    luks_uuid=$(conf_get "USB_LUKS_PARTITION_UUID")
+    local mapper_name
+    mapper_name=$(conf_get "LUKS_MAPPER_NAME" "usb-secret")
+    local keyfile_path
+    keyfile_path=$(conf_get "LUKS_KEYFILE" "/root/usb-luks.key")
+    local uid
+    uid=$(id -u "$pam_user" 2>/dev/null || echo "$UID")
+
+    # Sudoers
+    sudoers_install "$pam_user" "$luks_uuid" "$mapper_name" "$keyfile_path" "$uid" || exit 1
+
+    # udev suppress rule
+    local template_dir="${SPELL_DIR}/templates"
+    local suppress_rule="/etc/udev/rules.d/91-usb-auth-suppress.rules"
+    log_info "Installing udev suppress rule to $suppress_rule"
+    sed -e "s|{{LUKS_UUID}}|${luks_uuid}|g" \
+        "${template_dir}/udev-suppress.rules" > "$suppress_rule"
+    udevadm control --reload-rules
+    print_ok "Installed $suppress_rule"
+
+    # Unlock wrapper script
+    sudo -u "$pam_user" bash -c "
+        SPELL_DIR='${SPELL_DIR}'
+        CONF_FILE='${CONF_FILE}'
+        source '${SPELL_DIR}/lib/common.sh'
+        source '${SPELL_DIR}/lib/keyring.sh'
+        keyring_install_unlock_script
+    "
+
+    # Autostart entry
+    local home_dir
+    home_dir=$(getent passwd "$pam_user" | cut -d: -f6)
+    local autostart_dir="${home_dir}/.config/autostart"
+    local autostart_file="${autostart_dir}/usb-auth-keyring.desktop"
+    sudo -u "$pam_user" mkdir -p "$autostart_dir"
+    sed -e "s|{{HOME}}|${home_dir}|g" \
+        "${template_dir}/autostart.desktop" > "$autostart_file"
+    chown "$pam_user" "$autostart_file"
+    print_ok "Installed autostart: $autostart_file"
+
+    conf_mark_step 8
+}
+
+_wizard_step9_verify() {
+    print_step 9 10 "Verification"
+
+    local pam_user
+    pam_user=$(conf_get "PAM_USER" "$USER")
+    local luks_partition
+    luks_partition=$(conf_get "LUKS_PARTITION_DEVICE")
+    local all_ok=true
+
+    echo >&2
+
+    # pamusb-check
+    log_info "Running pamusb-check"
+    if pamusb-check "$pam_user" 2>&1 | tail -1 | grep -qi "access granted"; then
+        print_ok "pamusb-check: PASSED"
+    else
+        print_fail "pamusb-check: FAILED"
+        all_ok=false
+    fi
+
+    # LUKS cycle
+    if [[ -n "$luks_partition" ]]; then
+        log_info "Running LUKS dry-run cycle"
+        if keyring_test "$luks_partition" 2>/dev/null; then
+            print_ok "LUKS cycle: PASSED"
+        else
+            print_fail "LUKS cycle: FAILED"
+            all_ok=false
+        fi
+    fi
+
+    # Sudoers
+    if sudoers_validate 2>/dev/null; then
+        print_ok "Sudoers: VALID"
+    else
+        print_fail "Sudoers: INVALID"
+        all_ok=false
+    fi
+
+    # udev
+    for rule in /etc/udev/rules.d/90-usb-lock.rules /etc/udev/rules.d/91-usb-auth-suppress.rules; do
+        if [[ -f "$rule" ]]; then
+            print_ok "udev rule: $rule"
+        else
+            print_warn "udev rule missing: $rule"
+        fi
+    done
+
+    echo >&2
+    if $all_ok; then
+        print_ok "All verifications passed"
+    else
+        print_warn "Some verifications failed — review output above"
+    fi
+    conf_mark_step 9
+}
+
+_wizard_step10_summary() {
+    print_step 10 10 "Summary"
+
+    print_section "Files created/modified"
+
+    local pam_user
+    pam_user=$(conf_get "PAM_USER" "$USER")
+    local home_dir
+    home_dir=$(getent passwd "$pam_user" 2>/dev/null | cut -d: -f6 || echo "$HOME")
+
+    local files=(
+        "$CONF_FILE"
+        "${SPELL_DIR}/logs/setup.log"
+        "/etc/security/pam_usb.conf"
+        "/etc/udev/rules.d/90-usb-lock.rules"
+        "/etc/udev/rules.d/91-usb-auth-suppress.rules"
+        "/etc/sudoers.d/99-usb-auth"
+        "/usr/local/bin/usb-pam-guard.sh"
+        "/usr/local/bin/usb-pam-dispatch.sh"
+        "${home_dir}/.local/bin/usb-auth-unlock-keyring.sh"
+        "${home_dir}/.config/autostart/usb-auth-keyring.desktop"
+        "/root/usb-luks.key"
+    )
+
+    for f in "${files[@]}"; do
+        if [[ -e "$f" ]]; then
+            printf "  ${C_BGREEN}✓${C_RESET} %s\n" "$f" >&2
+        else
+            printf "  ${C_DIM}○${C_RESET} %s (not created)\n" "$f" >&2
+        fi
+    done
+
+    echo >&2
+    print_section "Next steps"
+    cat >&2 <<EOF
+  1. Log out and log back in with the USB connected to verify the full flow.
+  2. At login, GNOME Keyring should unlock automatically via USB.
+  3. Removing the USB will lock your session (if pam_usb lock is enabled).
+
+  If locked out:
+    Press Ctrl+Alt+F2 for a TTY console — password login still works there.
+    Recover pam_usb pad sync with: sudo usb-auth recover
+
+  Log files:
+    Setup: ${LOG_FILE}
+    Runtime (keyring): \$XDG_RUNTIME_DIR/usb-auth-keyring.log
+    Guard/dispatch:    /tmp/usb-auth-guard.log, /tmp/usb-auth-dispatch.log
+EOF
+
+    conf_mark_step 10
+    echo >&2
+    print_ok "Setup complete"
+}
+
+# ─── Subcommand implementations ───────────────────────────────────────────────
+
+cmd_setup() {
+    require_root
+    conf_load
+
+    print_header "usb-auth full setup wizard"
+
+    local last_step
+    last_step=$(conf_get "SETUP_STEP_COMPLETED" "0")
+
+    if [[ "$last_step" -gt 0 ]]; then
+        log_info "Previous setup detected (completed step $last_step)"
+        if confirm_yn "Resume from step $(( last_step + 1 ))?"; then
+            : # resume
+        else
+            if confirm_yes "Type 'yes' to restart from step 1"; then
+                last_step=0
+            fi
+        fi
+    fi
+
+    USB_DEVICE=$(conf_get "USB_DEVICE_PATH" "")
+    LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
+
+    [[ "$last_step" -lt 1 ]] && _wizard_step1_device
+    [[ "$last_step" -lt 2 ]] && _wizard_step2_analyze
+    [[ "$last_step" -lt 3 ]] && _wizard_step3_plan
+    [[ "$last_step" -lt 4 ]] && _wizard_step4_partition
+    [[ "$last_step" -lt 5 ]] && _wizard_step5_pam
+    [[ "$last_step" -lt 6 ]] && _wizard_step6_luks
+    [[ "$last_step" -lt 7 ]] && _wizard_step7_provision
+    [[ "$last_step" -lt 8 ]] && _wizard_step8_system
+    [[ "$last_step" -lt 9 ]] && _wizard_step9_verify
+    [[ "$last_step" -lt 10 ]] && _wizard_step10_summary
+}
+
+cmd_setup_pam() {
+    require_root
+    conf_load
+
+    print_header "usb-auth pam_usb setup"
+
+    USB_DEVICE=$(conf_get "USB_DEVICE_PATH" "")
+    if [[ -z "$USB_DEVICE" ]]; then
+        _wizard_step1_device
+    fi
+
+    _wizard_step5_pam
+}
+
+cmd_setup_keyring() {
+    require_root
+    conf_load
+
+    print_header "usb-auth keyring setup"
+
+    LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
+    if [[ -z "$LUKS_PARTITION" ]]; then
+        log_error "LUKS partition not configured. Run 'usb-auth partition' first."
+        exit 1
+    fi
+
+    LUKS_KEYFILE=$(conf_get "LUKS_KEYFILE" "/root/usb-luks.key")
+    LUKS_MAPPER_NAME=$(conf_get "LUKS_MAPPER_NAME" "usb-secret")
+    LUKS_MOUNT_BASE=$(conf_get "LUKS_MOUNT_BASE" "/run/user")
+
+    _wizard_step6_luks
+    _wizard_step7_provision
+    _wizard_step8_system
+    _wizard_step9_verify
+    _wizard_step10_summary
+}
+
+cmd_partition() {
+    require_root
+    conf_load
+
+    print_header "usb-auth partition management"
+
+    USB_DEVICE=$(conf_get "USB_DEVICE_PATH" "")
+    if [[ -z "$USB_DEVICE" ]]; then
+        _wizard_step1_device
+    fi
+
+    _wizard_step2_analyze
+    _wizard_step3_plan
+    _wizard_step4_partition
+}
+
+cmd_status() {
+    conf_load
+
+    print_header "usb-auth status"
+
+    local usb_dev
+    usb_dev=$(conf_get "USB_DEVICE_PATH" "")
+    local luks_uuid
+    luks_uuid=$(conf_get "USB_LUKS_PARTITION_UUID" "")
+
+    print_section "USB device"
+    if [[ -n "$usb_dev" ]]; then
+        if [[ -e "$usb_dev" ]]; then
+            print_ok "Device: $usb_dev ($(conf_get 'USB_DEVICE_MODEL' 'unknown model'))"
+            print_info "Serial: $(conf_get 'USB_DEVICE_SERIAL' 'unknown')"
+        else
+            print_warn "Device path $usb_dev not present (USB not connected?)"
+        fi
+    else
+        print_fail "USB device not configured (run 'usb-auth setup')"
+    fi
+
+    print_section "Partitions"
+    local main_uuid
+    main_uuid=$(conf_get "USB_MAIN_PARTITION_UUID" "")
+    [[ -n "$main_uuid" ]] && print_info "Main partition UUID: $main_uuid" || print_fail "Main partition UUID not configured"
+    [[ -n "$luks_uuid" ]] && print_info "LUKS partition UUID: $luks_uuid" || print_fail "LUKS partition UUID not configured"
+
+    if [[ -n "$luks_uuid" ]]; then
+        [[ -e "/dev/disk/by-uuid/${luks_uuid}" ]] && print_ok "LUKS device present" || print_warn "LUKS device not present"
+    fi
+
+    pam_status
+    keyring_status
+
+    echo >&2
+}
+
+cmd_test() {
+    conf_load
+
+    print_header "usb-auth diagnostics"
+
+    local pam_user
+    pam_user=$(conf_get "PAM_USER" "$USER")
+    local luks_partition
+    luks_partition=$(conf_get "LUKS_PARTITION_DEVICE" "")
+
+    LUKS_KEYFILE=$(conf_get "LUKS_KEYFILE" "/root/usb-luks.key")
+    LUKS_MAPPER_NAME=$(conf_get "LUKS_MAPPER_NAME" "usb-secret")
+    LUKS_MOUNT_BASE=$(conf_get "LUKS_MOUNT_BASE" "/run/user")
+
+    pam_test "$pam_user"
+
+    if [[ -n "$luks_partition" ]]; then
+        require_root
+        keyring_test "$luks_partition"
+    else
+        log_warn "LUKS partition not configured — skipping keyring test"
+    fi
+
+    sudoers_validate
+    sudoers_check_entries "$pam_user"
+}
+
+cmd_recover() {
+    conf_load
+    local pam_user
+    pam_user=$(conf_get "PAM_USER" "$USER")
+    pam_recover_pads "$pam_user"
+}
+
+cmd_rekey() {
+    conf_load
+    require_root
+
+    LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
+    LUKS_KEYFILE=$(conf_get "LUKS_KEYFILE" "/root/usb-luks.key")
+    LUKS_MAPPER_NAME=$(conf_get "LUKS_MAPPER_NAME" "usb-secret")
+    LUKS_MOUNT_BASE=$(conf_get "LUKS_MOUNT_BASE" "/run/user")
+
+    if [[ -z "$LUKS_PARTITION" ]]; then
+        log_error "LUKS partition not configured"
+        exit 1
+    fi
+
+    keyring_rekey "$LUKS_PARTITION" "$(hostname)"
+}
+
+cmd_provision_host() {
+    conf_load
+    require_root
+
+    LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
+    LUKS_KEYFILE=$(conf_get "LUKS_KEYFILE" "/root/usb-luks.key")
+    LUKS_MAPPER_NAME=$(conf_get "LUKS_MAPPER_NAME" "usb-secret")
+    LUKS_MOUNT_BASE=$(conf_get "LUKS_MOUNT_BASE" "/run/user")
+
+    if [[ -z "$LUKS_PARTITION" ]]; then
+        log_error "LUKS partition not configured"
+        exit 1
+    fi
+
+    keyring_provision_host "$LUKS_PARTITION"
+}
+
+cmd_lock_disable() {
+    require_root
+
+    local rule="/etc/udev/rules.d/90-usb-lock.rules"
+    local disabled="${rule}.disabled"
+
+    if [[ ! -f "$rule" ]]; then
+        log_warn "Lock rule not found: $rule"
+        exit 1
+    fi
+
+    mv "$rule" "$disabled"
+    udevadm control --reload-rules
+    print_ok "Session lock disabled (rule moved to ${disabled})"
+
+    # Create a temporary re-enable rule based on USB reconnection
+    local main_uuid
+    main_uuid=$(conf_get "USB_MAIN_PARTITION_UUID")
+    if [[ -n "$main_uuid" ]]; then
+        cat > /etc/udev/rules.d/89-usb-lock-reenable.rules <<EOF
+# Temporary: re-enable lock rule on USB reconnection
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="${main_uuid}", RUN+="/bin/bash -c 'mv ${disabled} ${rule}; rm /etc/udev/rules.d/89-usb-lock-reenable.rules; udevadm control --reload-rules'"
+EOF
+        udevadm control --reload-rules
+        print_info "Will auto-re-enable on next USB connection"
+    fi
+}
+
+cmd_lock_enable() {
+    require_root
+
+    local rule="/etc/udev/rules.d/90-usb-lock.rules"
+    local disabled="${rule}.disabled"
+    local temp_reenable="/etc/udev/rules.d/89-usb-lock-reenable.rules"
+
+    if [[ -f "$disabled" ]]; then
+        mv "$disabled" "$rule"
+        [[ -f "$temp_reenable" ]] && rm -f "$temp_reenable"
+        udevadm control --reload-rules
+        print_ok "Session lock re-enabled"
+    elif [[ -f "$rule" ]]; then
+        print_ok "Session lock rule already active"
+    else
+        log_error "Lock rule not found (not installed?)"
+        exit 1
+    fi
+}
+
+cmd_uninstall() {
+    require_root
+    conf_load
+
+    print_header "usb-auth uninstall"
+    log_warn "This will remove all usb-auth system configuration."
+    echo >&2
+
+    local pam_user
+    pam_user=$(conf_get "PAM_USER" "$USER")
+    LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
+    LUKS_KEYFILE=$(conf_get "LUKS_KEYFILE" "/root/usb-luks.key")
+    LUKS_MAPPER_NAME=$(conf_get "LUKS_MAPPER_NAME" "usb-secret")
+    LUKS_MOUNT_BASE=$(conf_get "LUKS_MOUNT_BASE" "/run/user")
+    local luks_uuid
+    luks_uuid=$(conf_get "USB_LUKS_PARTITION_UUID" "")
+
+    pam_uninstall
+    keyring_uninstall
+    sudoers_uninstall
+
+    # Remove udev suppress rule
+    if [[ -f /etc/udev/rules.d/91-usb-auth-suppress.rules ]]; then
+        rm -f /etc/udev/rules.d/91-usb-auth-suppress.rules
+        print_ok "Removed udev suppress rule"
+    fi
+
+    udevadm control --reload-rules 2>/dev/null
+
+    echo >&2
+    print_ok "Uninstall complete"
+    print_info "pam_usb binaries (pamusb-conf, pam_usb.so) were NOT removed"
+    print_info "To remove: follow your distro's uninstall procedure for pam_usb"
+}
+
+# ─── Arg parsing ──────────────────────────────────────────────────────────────
+
+[[ $# -eq 0 ]] && { usage; exit 0; }
+
+COMMAND=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        setup|setup-pam|setup-keyring|partition) COMMAND="$1"; shift; break ;;
+        status|test|recover)                     COMMAND="$1"; shift; break ;;
+        rekey|provision-host)                    COMMAND="$1"; shift; break ;;
+        lock-disable|lock-enable)                COMMAND="$1"; shift; break ;;
+        uninstall)                               COMMAND="$1"; shift; break ;;
+        --debug)  LOG_LEVEL="DEBUG"; shift ;;
+        --log)    shift; LOG_FILE="$1"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf "Unknown subcommand: %s\n\n" "$1" >&2; usage; exit 1 ;;
+    esac
+done
+
+case "$COMMAND" in
+    setup)          cmd_setup ;;
+    setup-pam)      cmd_setup_pam ;;
+    setup-keyring)  cmd_setup_keyring ;;
+    partition)      cmd_partition ;;
+    status)         cmd_status ;;
+    test)           cmd_test ;;
+    recover)        cmd_recover ;;
+    rekey)          cmd_rekey ;;
+    provision-host) cmd_provision_host ;;
+    lock-disable)   cmd_lock_disable ;;
+    lock-enable)    cmd_lock_enable ;;
+    uninstall)      cmd_uninstall ;;
+    *) printf "Unknown subcommand: %s\n\n" "$COMMAND" >&2; usage; exit 1 ;;
+esac
