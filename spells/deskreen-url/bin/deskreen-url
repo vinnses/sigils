@@ -1,0 +1,118 @@
+#!/bin/bash
+
+# deskreen-url — Rewrite Deskreen URL with the correct interface IP and push to device
+#
+# Reads the current Deskreen URL from clipboard, replaces the host with the IP
+# of the specified network interface, and pushes the new URL to a device via gclip.
+#
+# Workflow:
+#   1. Copy Deskreen URL to clipboard (from Deskreen app)
+#   2. Run: deskreen-url --device lenovo --iface lenovo
+#   3. Script rewrites URL, puts it in clipboard, pushes to device
+
+DESKREEN_PORT=3131
+
+# ─── Usage ───────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+Usage: deskreen-url --device <name> --iface <name|interface>
+
+Options:
+  --device <name>     Device to push URL to (gclip device name)
+  --iface  <value>    Network interface for the new IP
+                      Accepts: enx device name, interface name, or enx index
+  --port   <port>     Deskreen port (default: $DESKREEN_PORT)
+  -h, --help          Show this help
+
+Examples:
+  deskreen-url --device lenovo --iface lenovo
+  deskreen-url --device motorola --iface enxaabbccddeeff
+  deskreen-url --device lenovo --iface 0
+EOF
+}
+
+# ─── Arg parsing ─────────────────────────────────────────────────────────────
+
+[[ $# -eq 0 ]] && { usage; exit 0; }
+
+DEVICE=""
+IFACE_SEL=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) shift; DEVICE="$1" ;;
+        --iface)  shift; IFACE_SEL="$1" ;;
+        --port)   shift; DESKREEN_PORT="$1" ;;
+        -h|--help) usage; exit 0 ;;
+        *)        echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ -z "$DEVICE" ]]; then
+    echo "Error: --device is required." >&2
+    exit 1
+fi
+
+if [[ -z "$IFACE_SEL" ]]; then
+    echo "Error: --iface is required." >&2
+    exit 1
+fi
+
+# ─── Resolve IP from interface selector ──────────────────────────────────────
+# The selector can be a device name, interface name, or numeric index.
+# We delegate to enx ip, which handles all three via --name/--iface/--id.
+
+resolve_ip() {
+    local sel="$1"
+
+    # Numeric index
+    if [[ "$sel" =~ ^[0-9]+$ ]]; then
+        enx ip --id "$sel"
+        return
+    fi
+
+    # Interface name (starts with enx, eth, wlan, etc.)
+    if [[ "$sel" =~ ^(enx|eth|wlan|wlp) ]]; then
+        enx ip --iface "$sel"
+        return
+    fi
+
+    # Otherwise treat as device name
+    enx ip --name "$sel"
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+# 1. Read current URL from clipboard
+old_url=$(xclip -selection clipboard -o 2>/dev/null)
+if [[ -z "$old_url" ]]; then
+    echo "Error: clipboard is empty." >&2
+    exit 1
+fi
+
+# Validate it looks like a Deskreen URL
+if [[ ! "$old_url" =~ ^https?://[^/]+:[0-9]+/.+ ]]; then
+    echo "Error: clipboard doesn't contain a valid URL: $old_url" >&2
+    exit 1
+fi
+
+# 2. Extract session path (everything after host:port)
+session_path="${old_url#*://}"   # remove scheme
+session_path="${session_path#*/}" # remove host:port/
+
+# 3. Resolve new IP
+new_ip=$(resolve_ip "$IFACE_SEL")
+if [[ -z "$new_ip" ]]; then
+    echo "Error: could not resolve IP for '$IFACE_SEL'." >&2
+    exit 1
+fi
+
+# 4. Build new URL
+new_url="http://${new_ip}:${DESKREEN_PORT}/${session_path}"
+
+# 5. Push to device via gclip
+gclip push --name "$DEVICE" --txt "$new_url"
+
+echo "URL: $new_url → $DEVICE"

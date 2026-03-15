@@ -10,7 +10,7 @@ This project is intentionally small, personal, and experimental. Contributions a
 
 Contributions may include:
 
-* New shell scripts placed under `bin/`
+* New shell scripts placed under `spells/<spell>/bin/`
 * Refactors or improvements to existing scripts
 * Shell completions (bash, zsh, fish)
 * Tests (unit or integration) for existing scripts
@@ -41,13 +41,14 @@ If a script becomes complex enough to need deep abstractions, it probably belong
 
 A quick reminder of responsibilities:
 
-* `bin/` – user-facing executables
-* `lib/` – shared logic sourced by scripts (not executables)
-* `completions/` – shell completion definitions
-* `init/` – environment bootstrap scripts (PATH, sourcing completions)
-* `tests/` – automated tests (unit and integration)
+* `bin/` – root symlinks to spell entrypoints
+* `spells/<spell>/bin/` – user-facing executables
+* `spells/<spell>/lib/` – spell-local logic sourced by scripts
+* `spells/<spell>/completions/` – shell completion definitions
+* `spells/<spell>/tests/` – spell tests and fixtures
+* `init/` – environment bootstrap scripts (PATH + bash completions)
 
-Do not place executable logic directly in `lib/`.
+Do not place executable logic directly in `spells/<spell>/lib/`.
 
 ---
 

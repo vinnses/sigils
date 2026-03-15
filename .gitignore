@@ -1,4 +1,8 @@
 *.log
 *.tmp
-data
 __py*
+
+spells/*/logs/*
+!spells/*/logs/.gitkeep
+spells/*/data/*
+!spells/*/data/.gitkeep

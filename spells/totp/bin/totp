@@ -1,0 +1,450 @@
+#!/bin/bash
+
+# totp — Terminal TOTP code generator for two-factor authentication
+# Generate RFC 6238 time-based one-time passwords from the command line
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+TOTP_DATA_DIR="${SPELL_DIR}/data"
+TOTP_KEYS_FILE="${TOTP_DATA_DIR}/keys"
+DEFAULT_ALGO="sha1"
+DEFAULT_DIGITS=6
+DEFAULT_PERIOD=30
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+_check_dependencies() {
+    if ! command -v oathtool &>/dev/null; then
+        echo "Error: oathtool not found." >&2
+        echo "Install oath-toolkit:" >&2
+        echo "  Ubuntu/Debian: sudo apt install oathtool" >&2
+        echo "  Arch:          sudo pacman -S oath-toolkit" >&2
+        echo "  Fedora:        sudo dnf install oathtool" >&2
+        echo "  macOS:         brew install oath-toolkit" >&2
+        return 1
+    fi
+}
+
+_ensure_storage() {
+    if [[ ! -d "$TOTP_DATA_DIR" ]]; then
+        mkdir -p "$TOTP_DATA_DIR"
+    fi
+
+    # Enforce directory permissions
+    local dir_perms
+    dir_perms=$(stat -c '%a' "$TOTP_DATA_DIR" 2>/dev/null)
+    if [[ "$dir_perms" != "700" ]]; then
+        chmod 700 "$TOTP_DATA_DIR"
+        echo "Fixed: $TOTP_DATA_DIR permissions → 700" >&2
+    fi
+
+    if [[ ! -f "$TOTP_KEYS_FILE" ]]; then
+        (umask 077 && touch "$TOTP_KEYS_FILE")
+    fi
+
+    # Enforce keys file permissions
+    local file_perms
+    file_perms=$(stat -c '%a' "$TOTP_KEYS_FILE" 2>/dev/null)
+    if [[ "$file_perms" != "600" ]]; then
+        chmod 600 "$TOTP_KEYS_FILE"
+        echo "Fixed: $TOTP_KEYS_FILE permissions → 600" >&2
+    fi
+}
+
+_find_account() {
+    local name="$1"
+    awk -F'\t' -v n="$name" '$1 == n' "$TOTP_KEYS_FILE"
+}
+
+_account_exists() {
+    local name="$1"
+    [[ -n "$(_find_account "$name")" ]]
+}
+
+_list_names() {
+    awk -F'\t' 'NF >= 2 {print $1}' "$TOTP_KEYS_FILE"
+}
+
+_parse_uri() {
+    local uri="$1"
+
+    if [[ ! "$uri" =~ ^otpauth://totp/ ]]; then
+        echo "Error: invalid otpauth URI (must start with otpauth://totp/)" >&2
+        return 1
+    fi
+
+    # Extract label (between /totp/ and ?)
+    local path="${uri#otpauth://totp/}"
+    local label="${path%%\?*}"
+    # URL-decode %XX sequences
+    label=$(printf '%b' "${label//%/\\x}")
+    # Strip issuer prefix if present (Issuer:account format)
+    [[ "$label" == *:* ]] && label="${label#*:}"
+    # Trim whitespace
+    label="${label## }"
+    label="${label%% }"
+
+    # Extract parameters
+    local params="${path#*\?}"
+    local secret="" algo="$DEFAULT_ALGO" digits="$DEFAULT_DIGITS" period="$DEFAULT_PERIOD"
+    local issuer=""
+
+    IFS='&' read -ra pairs <<< "$params"
+    for pair in "${pairs[@]}"; do
+        local key="${pair%%=*}"
+        local val="${pair#*=}"
+        case "${key,,}" in
+            secret)    secret="${val^^}" ;;
+            algorithm) algo="${val,,}" ;;
+            digits)    digits="$val" ;;
+            period)    period="$val" ;;
+            issuer)    issuer=$(printf '%b' "${val//%/\\x}") ;;
+        esac
+    done
+
+    if [[ -z "$secret" ]]; then
+        echo "Error: URI has no secret parameter" >&2
+        return 1
+    fi
+
+    # Use issuer as name prefix if label is generic
+    local display_name="$label"
+    if [[ -n "$issuer" && "$label" != *"$issuer"* ]]; then
+        display_name="${issuer}:${label}"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$display_name" "$secret" "$algo" "$digits" "$period"
+}
+
+_resolve_account() {
+    local sel_name="$1"
+    local names
+    mapfile -t names < <(_list_names)
+
+    if [[ ${#names[@]} -eq 0 ]]; then
+        echo "Error: no accounts stored. Add one with: totp add" >&2
+        return 1
+    fi
+
+    if [[ -z "$sel_name" ]]; then
+        if [[ ${#names[@]} -eq 1 ]]; then
+            sel_name="${names[0]}"
+        else
+            echo "Error: multiple accounts found. Specify --name:" >&2
+            for n in "${names[@]}"; do
+                echo "  $n" >&2
+            done
+            return 1
+        fi
+    fi
+
+    local line
+    line=$(_find_account "$sel_name")
+    if [[ -z "$line" ]]; then
+        echo "Error: account '$sel_name' not found" >&2
+        return 1
+    fi
+
+    echo "$line"
+}
+
+_clip_copy() {
+    local text="$1"
+    if command -v xclip &>/dev/null; then
+        echo -n "$text" | xclip -selection clipboard -i
+    elif command -v wl-copy &>/dev/null; then
+        echo -n "$text" | wl-copy
+    elif command -v xsel &>/dev/null; then
+        echo -n "$text" | xsel --clipboard --input
+    elif command -v pbcopy &>/dev/null; then
+        echo -n "$text" | pbcopy
+    else
+        echo "Warning: no clipboard tool found (xclip, wl-copy, xsel, pbcopy)" >&2
+        return 1
+    fi
+}
+
+_clip_read() {
+    if command -v xclip &>/dev/null; then
+        xclip -selection clipboard -o
+    elif command -v wl-paste &>/dev/null; then
+        wl-paste
+    elif command -v xsel &>/dev/null; then
+        xsel --clipboard --output
+    elif command -v pbpaste &>/dev/null; then
+        pbpaste
+    else
+        echo "Error: no clipboard tool found (xclip, wl-paste, xsel, pbpaste)" >&2
+        return 1
+    fi
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_add() {
+    _ensure_storage
+
+    local name="$ADD_NAME" secret="$ADD_SECRET" algo="$ADD_ALGO" digits="$ADD_DIGITS" period="$ADD_PERIOD"
+
+    if [[ -n "$ADD_URI" ]]; then
+        local parsed
+        parsed=$(_parse_uri "$ADD_URI") || return 1
+        IFS=$'\t' read -r name secret algo digits period <<< "$parsed"
+    fi
+
+    # Read secret from clipboard if --clip and no --secret/--uri
+    if $USE_CLIP && [[ -z "$secret" ]] && [[ -z "$ADD_URI" ]]; then
+        secret=$(_clip_read) || return 1
+        # Trim whitespace/newlines from clipboard content
+        secret="${secret%"${secret##*[![:space:]]}"}"
+        secret="${secret#"${secret%%[![:space:]]*}"}"
+        if [[ -n "$secret" ]]; then
+            echo "Read secret from clipboard" >&2
+        fi
+    fi
+
+    if [[ -z "$name" ]]; then
+        echo "Error: specify --name <label>" >&2
+        return 1
+    fi
+
+    if [[ -z "$secret" ]]; then
+        echo "Error: specify --secret <base32>, --uri <otpauth://...>, or --clip" >&2
+        return 1
+    fi
+
+    # Normalize secret: uppercase, strip spaces and dashes
+    secret="${secret^^}"
+    secret="${secret// /}"
+    secret="${secret//-/}"
+
+    # Validate base32 characters
+    if [[ ! "$secret" =~ ^[A-Z2-7=]+$ ]]; then
+        echo "Error: invalid base32 secret" >&2
+        return 1
+    fi
+
+    # Validate algorithm
+    case "$algo" in
+        sha1|sha256|sha512) ;;
+        *)
+            echo "Error: algorithm must be sha1, sha256, or sha512" >&2
+            return 1
+            ;;
+    esac
+
+    # Validate digits
+    if [[ "$digits" != "6" && "$digits" != "7" && "$digits" != "8" ]]; then
+        echo "Error: digits must be 6, 7, or 8" >&2
+        return 1
+    fi
+
+    # Validate period
+    if [[ ! "$period" =~ ^[0-9]+$ ]] || [[ "$period" -lt 1 ]]; then
+        echo "Error: period must be a positive integer" >&2
+        return 1
+    fi
+
+    if _account_exists "$name"; then
+        echo "Error: account '$name' already exists. Remove it first." >&2
+        return 1
+    fi
+
+    # Verify the secret works with oathtool before saving
+    if ! oathtool --totp="$algo" --base32 --digits="$digits" --time-step-size="${period}s" "$secret" &>/dev/null; then
+        echo "Error: oathtool rejected the secret. Check format." >&2
+        return 1
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$secret" "$algo" "$digits" "$period" >> "$TOTP_KEYS_FILE"
+    echo "Added: $name" >&2
+}
+
+cmd_list() {
+    _ensure_storage
+
+    local names
+    mapfile -t names < <(_list_names)
+
+    if [[ ${#names[@]} -eq 0 ]]; then
+        echo "No accounts stored." >&2
+        return 0
+    fi
+
+    while IFS=$'\t' read -r name secret algo digits period; do
+        [[ -z "$name" ]] && continue
+        echo "$name"
+        echo "  algorithm: $algo"
+        echo "  digits:    $digits"
+        echo "  period:    ${period}s"
+        echo
+    done < "$TOTP_KEYS_FILE"
+}
+
+cmd_get() {
+    _ensure_storage
+
+    local line
+    line=$(_resolve_account "$SEL_NAME") || return 1
+
+    local name secret algo digits period
+    IFS=$'\t' read -r name secret algo digits period <<< "$line"
+
+    local code
+    code=$(oathtool --totp="$algo" --base32 --digits="$digits" --time-step-size="${period}s" "$secret")
+    if [[ $? -ne 0 ]]; then
+        echo "Error: failed to generate code" >&2
+        return 1
+    fi
+
+    # Format code with space in the middle for readability (e.g., "123 456")
+    local mid=$(( ${#code} / 2 ))
+    local formatted="${code:0:$mid} ${code:$mid}"
+
+    # Calculate seconds remaining
+    local now
+    now=$(date +%s)
+    local remaining=$(( period - (now % period) ))
+
+    echo "$name"
+    echo "  code:      $formatted"
+    echo "  expires:   ${remaining}s"
+
+    if $USE_CLIP; then
+        if _clip_copy "$code"; then
+            echo "  clipboard: copied" >&2
+        fi
+    fi
+}
+
+cmd_remove() {
+    _ensure_storage
+
+    local name="$SEL_NAME"
+    if [[ -z "$name" ]]; then
+        echo "Error: specify --name <label>" >&2
+        return 1
+    fi
+
+    if ! _account_exists "$name"; then
+        echo "Error: account '$name' not found" >&2
+        return 1
+    fi
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    awk -F'\t' -v n="$name" '$1 != n' "$TOTP_KEYS_FILE" > "$tmpfile"
+    mv "$tmpfile" "$TOTP_KEYS_FILE"
+    chmod 600 "$TOTP_KEYS_FILE"
+    echo "Removed: $name" >&2
+}
+
+cmd_export() {
+    _ensure_storage
+
+    local line
+    line=$(_resolve_account "$SEL_NAME") || return 1
+
+    local name secret algo digits period
+    IFS=$'\t' read -r name secret algo digits period <<< "$line"
+
+    local encoded_name
+    encoded_name=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$name'))" 2>/dev/null || echo "$name")
+
+    local uri="otpauth://totp/${encoded_name}?secret=${secret}&algorithm=${algo^^}&digits=${digits}&period=${period}"
+    echo "$uri"
+}
+
+# ─── Usage ───────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+Usage: totp <command> [options]
+
+Commands:
+  add                    Add a new TOTP account
+  list                   List stored accounts
+  get     [options]      Generate current TOTP code
+  remove  --name <name>  Remove an account
+  export  [options]      Show otpauth:// URI for account
+
+Add options:
+  --name   <label>       Account label (e.g. "github", "AWS:user@example.com")
+  --secret <base32>      Base32-encoded secret key
+  --uri    <otpauth://...>  Import from otpauth URI (overrides --name/--secret)
+  --clip                 Read secret from clipboard (add only)
+  --algo   <algorithm>   Hash algorithm: sha1, sha256, sha512 (default: sha1)
+  --digits <n>           Code length: 6, 7, or 8 (default: 6)
+  --period <seconds>     Time step in seconds (default: 30)
+
+Get/export options:
+  --name <label>         Select account by name (auto-selects if single account)
+  --clip                 Copy code to clipboard (get only)
+
+General:
+  -h, --help             Show this help
+
+Examples:
+  totp add --name github --secret JBSWY3DPEHPK3PXP
+  totp add --name github --clip
+  totp add --uri "otpauth://totp/GitHub:user?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+  totp list
+  totp get
+  totp get --name github
+  totp get --name github --clip
+  totp export --name github
+  totp remove --name github
+
+Dependencies:
+  oathtool (oath-toolkit)  — TOTP code generation
+  xclip | wl-copy | xsel  — clipboard support (optional, for --clip)
+EOF
+}
+
+# ─── Arg parsing ─────────────────────────────────────────────────────────────
+
+[[ $# -eq 0 ]] && { usage; exit 0; }
+
+COMMAND=""
+SEL_NAME=""
+ADD_NAME=""
+ADD_SECRET=""
+ADD_URI=""
+ADD_ALGO="$DEFAULT_ALGO"
+ADD_DIGITS="$DEFAULT_DIGITS"
+ADD_PERIOD="$DEFAULT_PERIOD"
+USE_CLIP=false
+
+case "$1" in
+    add|list|get|remove|export) COMMAND="$1"; shift ;;
+    -h|--help)                  usage; exit 0 ;;
+    *)                          echo "Unknown command: $1" >&2; usage; exit 1 ;;
+esac
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name)    shift; SEL_NAME="$1"; ADD_NAME="$1" ;;
+        --secret)  shift; ADD_SECRET="$1" ;;
+        --uri)     shift; ADD_URI="$1" ;;
+        --algo)    shift; ADD_ALGO="$1" ;;
+        --digits)  shift; ADD_DIGITS="$1" ;;
+        --period)  shift; ADD_PERIOD="$1" ;;
+        --clip)    USE_CLIP=true ;;
+        -h|--help) usage; exit 0 ;;
+        *)         echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    esac
+    shift
+done
+
+# ─── Dispatch ────────────────────────────────────────────────────────────────
+
+_check_dependencies || exit 1
+
+case "$COMMAND" in
+    add)    cmd_add ;;
+    list)   cmd_list ;;
+    get)    cmd_get ;;
+    remove) cmd_remove ;;
+    export) cmd_export ;;
+esac
