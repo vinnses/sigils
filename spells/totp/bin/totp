@@ -7,12 +7,21 @@
 
 SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 TOTP_DATA_DIR="${SPELL_DIR}/data"
-TOTP_KEYS_FILE="${TOTP_DATA_DIR}/keys"
+TOTP_KEYS_FILE="${TOTP_DATA_DIR}/keys"          # legacy plaintext (migration only)
+TOTP_KEYS_FILE_ENC="${TOTP_DATA_DIR}/keys.enc"  # encrypted secrets
+KEYRING_SERVICE="totp-spell"
+KEYRING_ACCOUNT="master"
 DEFAULT_ALGO="sha1"
 DEFAULT_DIGITS=6
 DEFAULT_PERIOD=30
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# ─── Per-invocation state ─────────────────────────────────────────────────────
+
+_PASSPHRASE=""
+_KEYS_CONTENT=""
+_KEYS_LOADED=false
+
+# ─── Dependency check ─────────────────────────────────────────────────────────
 
 _check_dependencies() {
     if ! command -v oathtool &>/dev/null; then
@@ -24,97 +33,165 @@ _check_dependencies() {
         echo "  macOS:         brew install oath-toolkit" >&2
         return 1
     fi
+    if ! command -v openssl &>/dev/null; then
+        echo "Error: openssl not found. Install openssl." >&2
+        return 1
+    fi
 }
 
 _ensure_storage() {
     if [[ ! -d "$TOTP_DATA_DIR" ]]; then
         mkdir -p "$TOTP_DATA_DIR"
     fi
-
-    # Enforce directory permissions
     local dir_perms
     dir_perms=$(stat -c '%a' "$TOTP_DATA_DIR" 2>/dev/null)
     if [[ "$dir_perms" != "700" ]]; then
         chmod 700 "$TOTP_DATA_DIR"
         echo "Fixed: $TOTP_DATA_DIR permissions → 700" >&2
     fi
+}
 
-    if [[ ! -f "$TOTP_KEYS_FILE" ]]; then
-        (umask 077 && touch "$TOTP_KEYS_FILE")
+# ─── Keyring ──────────────────────────────────────────────────────────────────
+
+_keyring_available() {
+    command -v secret-tool &>/dev/null || return 1
+    [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && return 0
+    [[ -S "/run/user/${UID}/bus" ]] && return 0
+    return 1
+}
+
+_keyring_get() {
+    secret-tool lookup service "$KEYRING_SERVICE" account "$KEYRING_ACCOUNT" 2>/dev/null
+}
+
+_keyring_set() {
+    local pass="$1"
+    printf '%s' "$pass" | secret-tool store \
+        --label "TOTP master passphrase" \
+        service "$KEYRING_SERVICE" \
+        account "$KEYRING_ACCOUNT" 2>/dev/null
+}
+
+# ─── Passphrase ───────────────────────────────────────────────────────────────
+
+# Prompt via terminal. Pass confirm=true to require double-entry.
+_prompt_passphrase() {
+    local confirm="${1:-false}"
+    local pass pass2
+    printf 'TOTP passphrase: ' >&2
+    read -rs pass < /dev/tty
+    printf '\n' >&2
+    if [[ -z "$pass" ]]; then
+        echo "Error: passphrase cannot be empty" >&2
+        return 1
+    fi
+    if [[ "$confirm" == "true" ]]; then
+        printf 'Confirm passphrase: ' >&2
+        read -rs pass2 < /dev/tty
+        printf '\n' >&2
+        if [[ "$pass" != "$pass2" ]]; then
+            echo "Error: passphrases do not match" >&2
+            return 1
+        fi
+    fi
+    printf '%s' "$pass"
+}
+
+# Populate $_PASSPHRASE: keyring first, then prompt. Cached for the invocation.
+_get_passphrase() {
+    [[ -n "$_PASSPHRASE" ]] && return 0
+    if _keyring_available; then
+        local kpass
+        kpass=$(_keyring_get)
+        if [[ -n "$kpass" ]]; then
+            _PASSPHRASE="$kpass"
+            return 0
+        fi
+    fi
+    local p
+    p=$(_prompt_passphrase) || return 1
+    _PASSPHRASE="$p"
+}
+
+# Best-effort passphrase wipe before script exit
+_clear_passphrase() {
+    _PASSPHRASE="0000000000000000000000000000000000000000000000000000000000000000"
+    _PASSPHRASE=""
+}
+
+# ─── Encrypted storage ────────────────────────────────────────────────────────
+
+# Load keys into $_KEYS_CONTENT. Handles encrypted, legacy plaintext, and empty.
+_load_keys() {
+    $_KEYS_LOADED && return 0
+
+    if [[ ! -f "$TOTP_KEYS_FILE_ENC" ]]; then
+        if [[ -f "$TOTP_KEYS_FILE" ]]; then
+            echo "Warning: keys stored unencrypted. Run 'totp init' to enable encryption." >&2
+            _KEYS_CONTENT=$(cat "$TOTP_KEYS_FILE")
+            _KEYS_LOADED=true
+            return 0
+        fi
+        # Fresh / empty storage
+        _KEYS_CONTENT=""
+        _KEYS_LOADED=true
+        return 0
     fi
 
-    # Enforce keys file permissions
-    local file_perms
-    file_perms=$(stat -c '%a' "$TOTP_KEYS_FILE" 2>/dev/null)
-    if [[ "$file_perms" != "600" ]]; then
-        chmod 600 "$TOTP_KEYS_FILE"
-        echo "Fixed: $TOTP_KEYS_FILE permissions → 600" >&2
+    _get_passphrase || return 1
+    local decrypted
+    decrypted=$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+        -pass "pass:${_PASSPHRASE}" -in "$TOTP_KEYS_FILE_ENC" 2>/dev/null)
+    if [[ $? -ne 0 ]]; then
+        echo "Error: failed to decrypt keys (wrong passphrase?)" >&2
+        return 1
+    fi
+    _KEYS_CONTENT="$decrypted"
+    _KEYS_LOADED=true
+}
+
+# Encrypt $_KEYS_CONTENT and write atomically to keys.enc.
+_save_keys() {
+    _ensure_storage
+    local tmpfile
+    tmpfile=$(mktemp -p "$TOTP_DATA_DIR" .keys.XXXXXX)
+    printf '%s' "$_KEYS_CONTENT" \
+        | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 \
+            -pass "pass:${_PASSPHRASE}" -out "$tmpfile" 2>/dev/null
+    if [[ $? -ne 0 ]]; then
+        rm -f "$tmpfile"
+        echo "Error: failed to encrypt keys" >&2
+        return 1
+    fi
+    chmod 600 "$tmpfile"
+    mv "$tmpfile" "$TOTP_KEYS_FILE_ENC"
+}
+
+# Fail early for write operations when encrypted storage is not yet set up.
+_require_encrypted() {
+    if [[ ! -f "$TOTP_KEYS_FILE_ENC" ]]; then
+        if [[ -f "$TOTP_KEYS_FILE" ]]; then
+            echo "Error: unencrypted storage detected. Run 'totp init' to migrate." >&2
+        else
+            echo "Error: storage not initialized. Run 'totp init' first." >&2
+        fi
+        return 1
     fi
 }
+
+# ─── In-memory data access ────────────────────────────────────────────────────
 
 _find_account() {
     local name="$1"
-    awk -F'\t' -v n="$name" '$1 == n' "$TOTP_KEYS_FILE"
+    awk -F'\t' -v n="$name" '$1 == n' <<< "$_KEYS_CONTENT"
 }
 
 _account_exists() {
-    local name="$1"
-    [[ -n "$(_find_account "$name")" ]]
+    [[ -n "$(_find_account "$1")" ]]
 }
 
 _list_names() {
-    awk -F'\t' 'NF >= 2 {print $1}' "$TOTP_KEYS_FILE"
-}
-
-_parse_uri() {
-    local uri="$1"
-
-    if [[ ! "$uri" =~ ^otpauth://totp/ ]]; then
-        echo "Error: invalid otpauth URI (must start with otpauth://totp/)" >&2
-        return 1
-    fi
-
-    # Extract label (between /totp/ and ?)
-    local path="${uri#otpauth://totp/}"
-    local label="${path%%\?*}"
-    # URL-decode %XX sequences
-    label=$(printf '%b' "${label//%/\\x}")
-    # Strip issuer prefix if present (Issuer:account format)
-    [[ "$label" == *:* ]] && label="${label#*:}"
-    # Trim whitespace
-    label="${label## }"
-    label="${label%% }"
-
-    # Extract parameters
-    local params="${path#*\?}"
-    local secret="" algo="$DEFAULT_ALGO" digits="$DEFAULT_DIGITS" period="$DEFAULT_PERIOD"
-    local issuer=""
-
-    IFS='&' read -ra pairs <<< "$params"
-    for pair in "${pairs[@]}"; do
-        local key="${pair%%=*}"
-        local val="${pair#*=}"
-        case "${key,,}" in
-            secret)    secret="${val^^}" ;;
-            algorithm) algo="${val,,}" ;;
-            digits)    digits="$val" ;;
-            period)    period="$val" ;;
-            issuer)    issuer=$(printf '%b' "${val//%/\\x}") ;;
-        esac
-    done
-
-    if [[ -z "$secret" ]]; then
-        echo "Error: URI has no secret parameter" >&2
-        return 1
-    fi
-
-    # Use issuer as name prefix if label is generic
-    local display_name="$label"
-    if [[ -n "$issuer" && "$label" != *"$issuer"* ]]; then
-        display_name="${issuer}:${label}"
-    fi
-
-    printf '%s\t%s\t%s\t%s\t%s\n' "$display_name" "$secret" "$algo" "$digits" "$period"
+    awk -F'\t' 'NF >= 2 {print $1}' <<< "$_KEYS_CONTENT"
 }
 
 _resolve_account() {
@@ -149,6 +226,53 @@ _resolve_account() {
     echo "$line"
 }
 
+# ─── URI / clipboard helpers ──────────────────────────────────────────────────
+
+_parse_uri() {
+    local uri="$1"
+
+    if [[ ! "$uri" =~ ^otpauth://totp/ ]]; then
+        echo "Error: invalid otpauth URI (must start with otpauth://totp/)" >&2
+        return 1
+    fi
+
+    local path="${uri#otpauth://totp/}"
+    local label="${path%%\?*}"
+    label=$(printf '%b' "${label//%/\\x}")
+    [[ "$label" == *:* ]] && label="${label#*:}"
+    label="${label## }"
+    label="${label%% }"
+
+    local params="${path#*\?}"
+    local secret="" algo="$DEFAULT_ALGO" digits="$DEFAULT_DIGITS" period="$DEFAULT_PERIOD"
+    local issuer=""
+
+    IFS='&' read -ra pairs <<< "$params"
+    for pair in "${pairs[@]}"; do
+        local key="${pair%%=*}"
+        local val="${pair#*=}"
+        case "${key,,}" in
+            secret)    secret="${val^^}" ;;
+            algorithm) algo="${val,,}" ;;
+            digits)    digits="$val" ;;
+            period)    period="$val" ;;
+            issuer)    issuer=$(printf '%b' "${val//%/\\x}") ;;
+        esac
+    done
+
+    if [[ -z "$secret" ]]; then
+        echo "Error: URI has no secret parameter" >&2
+        return 1
+    fi
+
+    local display_name="$label"
+    if [[ -n "$issuer" && "$label" != *"$issuer"* ]]; then
+        display_name="${issuer}:${label}"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$display_name" "$secret" "$algo" "$digits" "$period"
+}
+
 _clip_copy() {
     local text="$1"
     if command -v xclip &>/dev/null; then
@@ -180,10 +304,72 @@ _clip_read() {
     fi
 }
 
-# ─── Commands ────────────────────────────────────────────────────────────────
+# ─── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_init() {
+    _ensure_storage
+
+    # ── Re-key: existing encrypted storage ────────────────────────────────────
+    if [[ -f "$TOTP_KEYS_FILE_ENC" ]]; then
+        echo "Existing encrypted storage found." >&2
+        echo "Enter current passphrase to re-key." >&2
+        _load_keys || return 1
+        local new_pass
+        new_pass=$(_prompt_passphrase true) || return 1
+        _PASSPHRASE="$new_pass"
+        _save_keys || return 1
+        if _keyring_available; then
+            _keyring_set "$new_pass" \
+                && echo "Passphrase updated in GNOME Keyring." >&2 \
+                || echo "Warning: failed to update keyring entry." >&2
+        fi
+        echo "Re-key complete." >&2
+        return 0
+    fi
+
+    # ── Migration: legacy plaintext file ─────────────────────────────────────
+    if [[ -f "$TOTP_KEYS_FILE" ]]; then
+        echo "Unencrypted keys file found: $TOTP_KEYS_FILE" >&2
+        echo "Existing accounts will be encrypted and the plaintext file removed." >&2
+        _KEYS_CONTENT=$(cat "$TOTP_KEYS_FILE")
+        _KEYS_LOADED=true
+    fi
+
+    # ── Fresh install ─────────────────────────────────────────────────────────
+    local new_pass
+    new_pass=$(_prompt_passphrase true) || return 1
+    _PASSPHRASE="$new_pass"
+    _save_keys || return 1
+
+    if _keyring_available; then
+        if _keyring_set "$new_pass"; then
+            echo "Passphrase stored in GNOME Keyring." >&2
+        else
+            echo "Warning: failed to store passphrase in keyring. You will be prompted on each use." >&2
+        fi
+    else
+        echo "GNOME Keyring not available — passphrase will be prompted on each use." >&2
+        if ! command -v secret-tool &>/dev/null; then
+            echo "  Install libsecret-tools (Debian/Ubuntu) or libsecret (Arch) for keyring support." >&2
+        fi
+    fi
+
+    if [[ -f "$TOTP_KEYS_FILE" ]]; then
+        # Overwrite before removal (best-effort)
+        local size
+        size=$(wc -c < "$TOTP_KEYS_FILE")
+        dd if=/dev/zero of="$TOTP_KEYS_FILE" bs=1 count="$size" conv=notrunc &>/dev/null
+        rm -f "$TOTP_KEYS_FILE"
+        echo "Plaintext keys file removed." >&2
+        echo "Encryption initialized (accounts migrated)." >&2
+    else
+        echo "Encryption initialized." >&2
+    fi
+}
 
 cmd_add() {
     _ensure_storage
+    _require_encrypted || return 1
 
     local name="$ADD_NAME" secret="$ADD_SECRET" algo="$ADD_ALGO" digits="$ADD_DIGITS" period="$ADD_PERIOD"
 
@@ -193,15 +379,11 @@ cmd_add() {
         IFS=$'\t' read -r name secret algo digits period <<< "$parsed"
     fi
 
-    # Read secret from clipboard if --clip and no --secret/--uri
     if $USE_CLIP && [[ -z "$secret" ]] && [[ -z "$ADD_URI" ]]; then
         secret=$(_clip_read) || return 1
-        # Trim whitespace/newlines from clipboard content
         secret="${secret%"${secret##*[![:space:]]}"}"
         secret="${secret#"${secret%%[![:space:]]*}"}"
-        if [[ -n "$secret" ]]; then
-            echo "Read secret from clipboard" >&2
-        fi
+        [[ -n "$secret" ]] && echo "Read secret from clipboard" >&2
     fi
 
     if [[ -z "$name" ]]; then
@@ -214,18 +396,15 @@ cmd_add() {
         return 1
     fi
 
-    # Normalize secret: uppercase, strip spaces and dashes
     secret="${secret^^}"
     secret="${secret// /}"
     secret="${secret//-/}"
 
-    # Validate base32 characters
     if [[ ! "$secret" =~ ^[A-Z2-7=]+$ ]]; then
         echo "Error: invalid base32 secret" >&2
         return 1
     fi
 
-    # Validate algorithm
     case "$algo" in
         sha1|sha256|sha512) ;;
         *)
@@ -234,35 +413,43 @@ cmd_add() {
             ;;
     esac
 
-    # Validate digits
     if [[ "$digits" != "6" && "$digits" != "7" && "$digits" != "8" ]]; then
         echo "Error: digits must be 6, 7, or 8" >&2
         return 1
     fi
 
-    # Validate period
     if [[ ! "$period" =~ ^[0-9]+$ ]] || [[ "$period" -lt 1 ]]; then
         echo "Error: period must be a positive integer" >&2
         return 1
     fi
+
+    _load_keys || return 1
 
     if _account_exists "$name"; then
         echo "Error: account '$name' already exists. Remove it first." >&2
         return 1
     fi
 
-    # Verify the secret works with oathtool before saving
     if ! oathtool --totp="$algo" --base32 --digits="$digits" --time-step-size="${period}s" "$secret" &>/dev/null; then
         echo "Error: oathtool rejected the secret. Check format." >&2
         return 1
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$secret" "$algo" "$digits" "$period" >> "$TOTP_KEYS_FILE"
+    local new_entry
+    new_entry=$(printf '%s\t%s\t%s\t%s\t%s' "$name" "$secret" "$algo" "$digits" "$period")
+    if [[ -n "$_KEYS_CONTENT" ]]; then
+        _KEYS_CONTENT="${_KEYS_CONTENT}"$'\n'"${new_entry}"
+    else
+        _KEYS_CONTENT="$new_entry"
+    fi
+
+    _save_keys || return 1
     echo "Added: $name" >&2
 }
 
 cmd_list() {
     _ensure_storage
+    _load_keys || return 1
 
     local names
     mapfile -t names < <(_list_names)
@@ -279,11 +466,12 @@ cmd_list() {
         echo "  digits:    $digits"
         echo "  period:    ${period}s"
         echo
-    done < "$TOTP_KEYS_FILE"
+    done <<< "$_KEYS_CONTENT"
 }
 
 cmd_get() {
     _ensure_storage
+    _load_keys || return 1
 
     local line
     line=$(_resolve_account "$SEL_NAME") || return 1
@@ -298,11 +486,9 @@ cmd_get() {
         return 1
     fi
 
-    # Format code with space in the middle for readability (e.g., "123 456")
     local mid=$(( ${#code} / 2 ))
     local formatted="${code:0:$mid} ${code:$mid}"
 
-    # Calculate seconds remaining
     local now
     now=$(date +%s)
     local remaining=$(( period - (now % period) ))
@@ -320,6 +506,8 @@ cmd_get() {
 
 cmd_remove() {
     _ensure_storage
+    _require_encrypted || return 1
+    _load_keys || return 1
 
     local name="$SEL_NAME"
     if [[ -z "$name" ]]; then
@@ -332,16 +520,14 @@ cmd_remove() {
         return 1
     fi
 
-    local tmpfile
-    tmpfile=$(mktemp)
-    awk -F'\t' -v n="$name" '$1 != n' "$TOTP_KEYS_FILE" > "$tmpfile"
-    mv "$tmpfile" "$TOTP_KEYS_FILE"
-    chmod 600 "$TOTP_KEYS_FILE"
+    _KEYS_CONTENT=$(awk -F'\t' -v n="$name" '$1 != n' <<< "$_KEYS_CONTENT")
+    _save_keys || return 1
     echo "Removed: $name" >&2
 }
 
 cmd_export() {
     _ensure_storage
+    _load_keys || return 1
 
     local line
     line=$(_resolve_account "$SEL_NAME") || return 1
@@ -356,13 +542,14 @@ cmd_export() {
     echo "$uri"
 }
 
-# ─── Usage ───────────────────────────────────────────────────────────────────
+# ─── Usage ────────────────────────────────────────────────────────────────────
 
 usage() {
     cat <<EOF
 Usage: totp <command> [options]
 
 Commands:
+  init                   Initialize encrypted storage (run once, or to re-key)
   add                    Add a new TOTP account
   list                   List stored accounts
   get     [options]      Generate current TOTP code
@@ -386,6 +573,7 @@ General:
   -h, --help             Show this help
 
 Examples:
+  totp init
   totp add --name github --secret JBSWY3DPEHPK3PXP
   totp add --name github --clip
   totp add --uri "otpauth://totp/GitHub:user?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
@@ -397,12 +585,14 @@ Examples:
   totp remove --name github
 
 Dependencies:
-  oathtool (oath-toolkit)  — TOTP code generation
+  oathtool (oath-toolkit)  — TOTP code generation (required)
+  openssl                  — AES-256 encryption (required)
+  secret-tool (libsecret)  — GNOME Keyring integration (optional)
   xclip | wl-copy | xsel  — clipboard support (optional, for --clip)
 EOF
 }
 
-# ─── Arg parsing ─────────────────────────────────────────────────────────────
+# ─── Arg parsing ──────────────────────────────────────────────────────────────
 
 [[ $# -eq 0 ]] && { usage; exit 0; }
 
@@ -417,9 +607,9 @@ ADD_PERIOD="$DEFAULT_PERIOD"
 USE_CLIP=false
 
 case "$1" in
-    add|list|get|remove|export) COMMAND="$1"; shift ;;
-    -h|--help)                  usage; exit 0 ;;
-    *)                          echo "Unknown command: $1" >&2; usage; exit 1 ;;
+    init|add|list|get|remove|export) COMMAND="$1"; shift ;;
+    -h|--help)                        usage; exit 0 ;;
+    *)                                echo "Unknown command: $1" >&2; usage; exit 1 ;;
 esac
 
 while [[ $# -gt 0 ]]; do
@@ -437,14 +627,17 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# ─── Dispatch ────────────────────────────────────────────────────────────────
+# ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 _check_dependencies || exit 1
 
 case "$COMMAND" in
+    init)   cmd_init ;;
     add)    cmd_add ;;
     list)   cmd_list ;;
     get)    cmd_get ;;
     remove) cmd_remove ;;
     export) cmd_export ;;
 esac
+
+_clear_passphrase

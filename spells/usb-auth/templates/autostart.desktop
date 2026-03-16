@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Exec={{HOME}}/.local/bin/usb-auth-unlock-keyring.sh
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+Name=USB Auth Keyring Unlock
+Comment=Unlock GNOME Keyring using USB split-knowledge architecture
