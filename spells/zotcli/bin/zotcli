@@ -1,0 +1,73 @@
+#!/bin/bash
+# ============================
+# zotcli - Zotero CLI interface
+# via pyzotero
+# ============================
+
+set -o pipefail
+
+# Resolve SPELL_DIR relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPELL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ============================
+# Colors
+# ============================
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'
+  NC='\033[0m'
+else
+  RED='' NC=''
+fi
+
+log_error() { echo -e "${RED}[error]${NC} $*" >&2; }
+
+# ============================
+# Parse global flags
+# ============================
+FRESH=false
+ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--fresh" ]]; then
+    FRESH=true
+  else
+    ARGS+=("$arg")
+  fi
+done
+
+SUBCOMMAND="${ARGS[0]:-}"
+SUBARGS=("${ARGS[@]:1}")
+
+export SPELL_DIR
+export ZOTCLI_FRESH="$FRESH"
+
+# ============================
+# Subcommand routing
+# ============================
+case "$SUBCOMMAND" in
+  "")
+    exec python3 "$SPELL_DIR/lib/shell.py"
+    ;;
+  collections|items|info|attachments|connect|sync)
+    exec python3 "$SPELL_DIR/lib/commands.py" "$SUBCOMMAND" "${SUBARGS[@]}"
+    ;;
+  *)
+    log_error "Unknown subcommand: $SUBCOMMAND"
+    echo "" >&2
+    echo "Usage: zotcli [--fresh] <subcommand> [args]" >&2
+    echo "" >&2
+    echo "Subcommands:" >&2
+    echo "  collections [--flat]  List collections as a tree (or flat with --flat)" >&2
+    echo "  items <collection>    List items in a collection" >&2
+    echo "  info <item>           Print item metadata" >&2
+    echo "  attachments <item>    List attachments for an item" >&2
+    echo "  connect               Interactive credential setup" >&2
+    echo "  sync                  Force-refresh the local cache from the API" >&2
+    echo "" >&2
+    echo "Global flags:" >&2
+    echo "  --fresh               Bypass cache, fetch directly from API" >&2
+    echo "" >&2
+    echo "Run 'zotcli' with no arguments for an interactive Python shell." >&2
+    exit 1
+    ;;
+esac

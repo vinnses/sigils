@@ -6,3 +6,5 @@ spells/*/logs/*
 !spells/*/logs/.gitkeep
 spells/*/data/*
 !spells/*/data/.gitkeep
+
+spells/zotcli/config/credentials.env
