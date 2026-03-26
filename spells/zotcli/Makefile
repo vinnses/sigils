@@ -17,4 +17,5 @@ fmt:
 	@echo "[skip] no spell-local formatting configured"
 
 clean:
-	@echo "[skip] no spell-local cleanup configured"
+	@rm -f "$(SPELL_DIR)/data/cache.json" "$(SPELL_DIR)/data/state.json"
+	@echo "Removed cache.json and state.json"

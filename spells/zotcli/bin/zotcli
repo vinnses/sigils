@@ -50,7 +50,7 @@ case "$SUBCOMMAND" in
   "")
     exec python3 "$SPELL_DIR/lib/shell.py"
     ;;
-  collections|items|info|attachments|connect|sync)
+  cd|pwd|ls|tree|cat|get|connect|sync)
     exec python3 "$SPELL_DIR/lib/commands.py" "$SUBCOMMAND" "${SUBARGS[@]}"
     ;;
   *)
@@ -58,13 +58,26 @@ case "$SUBCOMMAND" in
     echo "" >&2
     echo "Usage: zotcli [--fresh] <subcommand> [args]" >&2
     echo "" >&2
-    echo "Subcommands:" >&2
-    echo "  collections [--flat]  List collections as a tree (or flat with --flat)" >&2
-    echo "  items <collection>    List items in a collection" >&2
-    echo "  info <item>           Print item metadata" >&2
-    echo "  attachments <item>    List attachments for an item" >&2
+    echo "Navigation:" >&2
+    echo "  cd [path]             Navigate to a collection (~, .., -, relative, absolute)" >&2
+    echo "  pwd                   Print current collection path" >&2
+    echo "  tree                  Recursive tree from current level" >&2
+    echo "" >&2
+    echo "Listing:" >&2
+    echo "  ls [path|item]        List collections + items (or item children)" >&2
+    echo "" >&2
+    echo "Reading:" >&2
+    echo "  cat <item>[:<child>]  Show item or child metadata" >&2
+    echo "" >&2
+    echo "Exporting:" >&2
+    echo "  get <item> --bibtex   Export BibTeX to stdout" >&2
+    echo "  get <item> --json     Export JSON to stdout" >&2
+    echo "  get <item>:<child>    Download attachment to current directory" >&2
+    echo "  get <item>:<child> -o <path>  Download to specified path" >&2
+    echo "" >&2
+    echo "Setup & maintenance:" >&2
     echo "  connect               Interactive credential setup" >&2
-    echo "  sync                  Force-refresh the local cache from the API" >&2
+    echo "  sync                  Force-refresh cache from API" >&2
     echo "" >&2
     echo "Global flags:" >&2
     echo "  --fresh               Bypass cache, fetch directly from API" >&2
