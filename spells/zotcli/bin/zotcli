@@ -6,9 +6,11 @@
 
 set -o pipefail
 
-# Resolve SPELL_DIR relative to this script
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve SPELL_DIR relative to this script, following symlinks
+_SCRIPT="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$_SCRIPT")" && pwd)"
 SPELL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+unset _SCRIPT
 
 # ============================
 # Colors
