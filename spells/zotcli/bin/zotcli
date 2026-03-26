@@ -50,7 +50,7 @@ case "$SUBCOMMAND" in
   "")
     exec python3 "$SPELL_DIR/lib/shell.py"
     ;;
-  cd|pwd|ls|tree|cat|get|connect|sync)
+  cd|pwd|ls|tree|cat|get|connect|sync|init|_complete|_spell_dir)
     exec python3 "$SPELL_DIR/lib/commands.py" "$SUBCOMMAND" "${SUBARGS[@]}"
     ;;
   *)
@@ -78,6 +78,7 @@ case "$SUBCOMMAND" in
     echo "Setup & maintenance:" >&2
     echo "  connect               Interactive credential setup" >&2
     echo "  sync                  Force-refresh cache from API" >&2
+    echo "  init bash             Print shell integration script (eval it in .bashrc)" >&2
     echo "" >&2
     echo "Global flags:" >&2
     echo "  --fresh               Bypass cache, fetch directly from API" >&2

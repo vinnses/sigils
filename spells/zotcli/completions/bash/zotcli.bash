@@ -1,103 +1,7 @@
 #!/usr/bin/env bash
 # Bash completion for zotcli (v2)
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_zotcli_spell_dir() {
-    local bin_path
-    bin_path=$(command -v zotcli 2>/dev/null) || return 1
-    bin_path=$(readlink -f "$bin_path" 2>/dev/null || realpath "$bin_path" 2>/dev/null) || return 1
-    dirname "$(dirname "$bin_path")"
-}
-
-_zotcli_state_key() {
-    local spell_dir state_file
-    spell_dir=$(_zotcli_spell_dir) || return
-    state_file="$spell_dir/data/state.json"
-    [[ -f "$state_file" ]] || { echo "null"; return; }
-    python3 -c "
-import json, sys
-try:
-    with open('$state_file') as f:
-        print(json.load(f).get('collection_key') or 'null')
-except Exception:
-    print('null')
-" 2>/dev/null
-}
-
-# Emit collection names at the given parent_key level (null = top-level)
-_zotcli_collections_at() {
-    local spell_dir cache_file parent_key="$1"
-    spell_dir=$(_zotcli_spell_dir) || return
-    cache_file="$spell_dir/data/cache.json"
-    [[ -f "$cache_file" ]] || return
-    python3 -c "
-import json, sys
-parent = None if '$parent_key' in ('null', '') else '$parent_key'
-try:
-    with open('$cache_file') as f:
-        cols = json.load(f).get('collections', [])
-    for c in cols:
-        d = c.get('data', c)
-        p = d.get('parentCollection') or None
-        if p == parent:
-            print(d.get('name', ''))
-except Exception:
-    pass
-" 2>/dev/null
-}
-
-# Resolve a partially-typed absolute path prefix (~/foo/bar) and return
-# the collection key of the last fully resolved segment, plus the trailing
-# partial name for prefix-match.
-# Outputs: "<parent_key> <partial>" on one line.
-_zotcli_resolve_partial_path() {
-    local spell_dir cache_file path_so_far="$1"
-    spell_dir=$(_zotcli_spell_dir) || return
-    cache_file="$spell_dir/data/cache.json"
-    [[ -f "$cache_file" ]] || return
-    python3 -c "
-import json, sys
-path = '$path_so_far'
-try:
-    with open('$cache_file') as f:
-        cols = json.load(f).get('collections', [])
-except Exception:
-    sys.exit(0)
-
-# Strip leading ~/
-if path.startswith('~/'):
-    path = path[2:]
-elif path.startswith('/'):
-    path = path[1:]
-else:
-    sys.exit(0)
-
-# Walk all but the last segment
-parts = path.split('/')
-resolved_parts = parts[:-1]
-partial        = parts[-1]
-
-parent = None
-for part in resolved_parts:
-    if not part:
-        continue
-    match = next((c for c in cols
-                  if (c.get('data',c).get('parentCollection') or None) == parent
-                  and c.get('data',c).get('name','') == part), None)
-    if match is None:
-        sys.exit(0)
-    parent = match.get('data', match).get('key')
-
-print(parent if parent is not None else 'null', partial)
-" 2>/dev/null
-}
-
-# ---------------------------------------------------------------------------
-# Main completion function
-# ---------------------------------------------------------------------------
+# Delegates path resolution to: zotcli _complete <typed_prefix>
+# which reads the local cache — no API calls, no network latency.
 
 _zotcli() {
     local cur prev words cword
@@ -108,9 +12,9 @@ _zotcli() {
         cword=$COMP_CWORD
     }
 
-    local subcommands="cd pwd ls tree cat get connect sync --fresh"
+    local subcommands="cd pwd ls tree cat get connect sync init"
 
-    # Find the subcommand (skip --fresh and the binary name)
+    # Find the subcommand (skip --fresh and other flags)
     local subcmd=""
     local i
     for ((i = 1; i < cword; i++)); do
@@ -120,70 +24,47 @@ _zotcli() {
         esac
     done
 
-    # No subcommand yet
+    # No subcommand yet — complete subcommand names and global flags
     if [[ -z "$subcmd" ]]; then
-        COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
+        COMPREPLY=($(compgen -W "$subcommands --fresh" -- "$cur"))
         return
     fi
 
-    # ----------------------------------------------------------------
+    # -----------------------------------------------------------------------
     # Subcommand-specific completions
-    # ----------------------------------------------------------------
+    # -----------------------------------------------------------------------
     case "$subcmd" in
 
         cd|ls)
-            # Complete collection names.
-            # Handle absolute paths (~/...) and relative paths.
-            if [[ "$cur" == "~/"* ]]; then
-                # Absolute path: resolve up to the last /
-                local read result parent_key partial
-                read -r parent_key partial < <(_zotcli_resolve_partial_path "$cur")
-                if [[ -n "$parent_key" ]]; then
-                    local names
-                    names=$(_zotcli_collections_at "$parent_key")
-                    # Build completions preserving the prefix up to last /
-                    local prefix="${cur%/*}/"
-                    local suggestions=()
-                    while IFS= read -r name; do
-                        [[ "$name" == "$partial"* ]] && suggestions+=("${prefix}${name}/")
-                    done <<< "$names"
-                    COMPREPLY=("${suggestions[@]}")
-                fi
-            elif [[ "$cur" == "~" ]]; then
-                COMPREPLY=($(compgen -W "~/" -- "$cur"))
-            elif [[ "$subcmd" == "cd" && "$cur" == "-" ]]; then
-                COMPREPLY=("-")
-            else
-                # Relative: complete names at current state level
-                local current_key
-                current_key=$(_zotcli_state_key)
-                local names
-                names=$(_zotcli_collections_at "$current_key")
-                # Append / to each to signal it's a directory-like path
-                local suggestions=()
-                while IFS= read -r name; do
-                    [[ "$name" == "$cur"* ]] && suggestions+=("${name}/")
-                done <<< "$names"
-                COMPREPLY=("${suggestions[@]}")
-                # Also offer special tokens for cd
-                if [[ "$subcmd" == "cd" ]]; then
-                    COMPREPLY+=($(compgen -W "~ .. -" -- "$cur"))
-                fi
+            # Delegate entirely to zotcli _complete which reads the cache.
+            # It understands relative names, ~/absolute paths, and prefix matching.
+            compopt -o nospace 2>/dev/null
+            local IFS=$'\n'
+            local results
+            results=$(command zotcli _complete "$cur" 2>/dev/null)
+            COMPREPLY=()
+            while IFS=$'\t' read -r completion _type; do
+                [[ -n "$completion" ]] && COMPREPLY+=("$completion")
+            done <<< "$results"
+
+            # cd-only special tokens
+            if [[ "$subcmd" == "cd" ]]; then
+                COMPREPLY+=($(compgen -W "~ .. -" -- "$cur"))
             fi
             ;;
 
-        cat|get)
-            # Complete item references from cache (citation keys).
-            # Only offer top-level cache data since we don't cache per-collection.
-            local spell_dir cache_file
-            spell_dir=$(_zotcli_spell_dir) || return
-            # No item cache in v2 — graceful fallback (no API call during completion)
+        get)
+            # Complete flags; item refs have no cache in v2
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--bibtex --json -o" -- "$cur"))
+            fi
             ;;
 
-        tree|pwd|connect|sync)
-            # No argument completion needed
+        init)
+            COMPREPLY=($(compgen -W "bash" -- "$cur"))
             ;;
 
+        # pwd, tree, cat, connect, sync: no argument completions
     esac
 }
 

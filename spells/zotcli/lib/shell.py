@@ -168,6 +168,38 @@ Navigator methods:
 Example:
   n.cd("~/1.Books"); n.ls()
 """
+    _start_repl(namespace, banner)
+
+
+def _start_repl(namespace, banner):
+    """Try IPython → ptpython → stdlib code.interact (in that order)."""
+    # IPython
+    try:
+        from IPython import start_ipython
+        # start_ipython (not embed) to respect user's IPython config and avoid
+        # namespace bugs with closures. argv=[] prevents parsing sys.argv.
+        start_ipython(argv=[], user_ns=namespace)
+        return
+    except ImportError:
+        pass
+
+    # ptpython
+    try:
+        from ptpython.repl import embed as pt_embed
+        pt_embed(globals=namespace, locals=namespace)
+        return
+    except ImportError:
+        pass
+
+    # Stdlib fallback — add readline tab completion
+    try:
+        import readline
+        import rlcompleter
+        readline.set_completer(rlcompleter.Completer(namespace).complete)
+        readline.parse_and_bind("tab: complete")
+    except ImportError:
+        pass
+
     code.interact(banner=banner, local=namespace, exitmsg="")
 
 
