@@ -1,0 +1,89 @@
+#!/bin/bash
+# ============================
+# zotcli - Zotero CLI interface
+# via pyzotero
+# ============================
+
+set -o pipefail
+
+# Resolve SPELL_DIR relative to this script, following symlinks
+_SCRIPT="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$_SCRIPT")" && pwd)"
+SPELL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+unset _SCRIPT
+
+# ============================
+# Colors
+# ============================
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'
+  NC='\033[0m'
+else
+  RED='' NC=''
+fi
+
+log_error() { echo -e "${RED}[error]${NC} $*" >&2; }
+
+# ============================
+# Parse global flags
+# ============================
+FRESH=false
+ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--fresh" ]]; then
+    FRESH=true
+  else
+    ARGS+=("$arg")
+  fi
+done
+
+SUBCOMMAND="${ARGS[0]:-}"
+SUBARGS=("${ARGS[@]:1}")
+
+export SPELL_DIR
+export ZOTCLI_FRESH="$FRESH"
+
+# ============================
+# Subcommand routing
+# ============================
+case "$SUBCOMMAND" in
+  "")
+    exec python3 "$SPELL_DIR/lib/shell.py"
+    ;;
+  cd|pwd|ls|tree|cat|get|connect|sync|init|_complete|_spell_dir)
+    exec python3 "$SPELL_DIR/lib/commands.py" "$SUBCOMMAND" "${SUBARGS[@]}"
+    ;;
+  *)
+    log_error "Unknown subcommand: $SUBCOMMAND"
+    echo "" >&2
+    echo "Usage: zotcli [--fresh] <subcommand> [args]" >&2
+    echo "" >&2
+    echo "Navigation:" >&2
+    echo "  cd [path]             Navigate to a collection (~, .., -, relative, absolute)" >&2
+    echo "  pwd                   Print current collection path" >&2
+    echo "  tree                  Recursive tree from current level" >&2
+    echo "" >&2
+    echo "Listing:" >&2
+    echo "  ls [path|item]        List collections + items (or item children)" >&2
+    echo "" >&2
+    echo "Reading:" >&2
+    echo "  cat <item>[:<child>]  Show item or child metadata" >&2
+    echo "" >&2
+    echo "Exporting:" >&2
+    echo "  get <item> --bibtex   Export BibTeX to stdout" >&2
+    echo "  get <item> --json     Export JSON to stdout" >&2
+    echo "  get <item>:<child>    Download attachment to current directory" >&2
+    echo "  get <item>:<child> -o <path>  Download to specified path" >&2
+    echo "" >&2
+    echo "Setup & maintenance:" >&2
+    echo "  connect               Interactive credential setup" >&2
+    echo "  sync                  Force-refresh cache from API" >&2
+    echo "  init bash             Print shell integration script (eval it in .bashrc)" >&2
+    echo "" >&2
+    echo "Global flags:" >&2
+    echo "  --fresh               Bypass cache, fetch directly from API" >&2
+    echo "" >&2
+    echo "Run 'zotcli' with no arguments for an interactive Python shell." >&2
+    exit 1
+    ;;
+esac
