@@ -65,6 +65,22 @@ def _fmt_creators(creators, max_n=3):
     return result
 
 
+def _sort_key_for_item(item, sort_by):
+    """Return a sort key for an item based on sort_by field name."""
+    data = item.get("data", item)
+    if sort_by == "date":
+        return data.get("date", "") or ""
+    if sort_by == "type":
+        return data.get("itemType", "") or ""
+    if sort_by == "creator":
+        creators = data.get("creators", [])
+        if creators:
+            return (creators[0].get("lastName") or creators[0].get("name") or "").lower()
+        return ""
+    # Default: name (citation key or title)
+    return _item_label(data).lower()
+
+
 # ---------------------------------------------------------------------------
 # Output functions
 # ---------------------------------------------------------------------------
@@ -73,25 +89,50 @@ def print_pwd(path):
     print(path)
 
 
-def print_ls(collections, items):
-    """Mixed listing: collections (bold + /) then items."""
-    for col in collections:
+def print_ls(collections, items, sort_key="name", reverse=False,
+             current_collection_key=None):
+    """
+    Mixed listing: collections (bold + /) then items.
+
+    items with len(data.collections) > 1 and current collection NOT first
+    are prefixed with '→'.
+    """
+    for col in sorted(collections,
+                      key=lambda c: c.get("data", c).get("name", "").lower()):
         data = col.get("data", col)
         print(_c(BOLD, data.get("name", "") + "/"))
 
-    for item in items:
+    sorted_items = sorted(items, key=lambda it: _sort_key_for_item(it, sort_key),
+                          reverse=reverse)
+    if sort_key == "date" and not reverse:
+        # newest first for date
+        sorted_items = sorted(items, key=lambda it: _sort_key_for_item(it, sort_key),
+                              reverse=True)
+
+    for item in sorted_items:
         data     = item.get("data", item)
         label    = _item_label(data)
         itype    = _c(DIM, data.get("itemType", ""))
         creators = _fmt_creators(data.get("creators", []))
         year     = (data.get("date", "") or "")[:4]
         meta     = f"{creators} ({year})" if creators else year
-        print(f"{_c(CYAN, label)}\t{itype}\t{meta}")
+
+        # Multi-collection indicator
+        item_cols = data.get("collections", [])
+        prefix = ""
+        if len(item_cols) > 1 and current_collection_key is not None:
+            if item_cols[0] != current_collection_key:
+                prefix = "→ "
+
+        print(f"{prefix}{_c(CYAN, label)}\t{itype}\t{meta}")
 
 
 def print_children(children):
     """List item children (attachments/notes): filename TAB type."""
-    for child in children:
+    for child in sorted(children,
+                        key=lambda c: (c.get("data", c).get("filename")
+                                       or c.get("data", c).get("title")
+                                       or "").lower()):
         data     = child.get("data", child)
         filename = data.get("filename") or data.get("title") or data.get("key", "")
         itype    = data.get("itemType", "")
@@ -148,12 +189,39 @@ def print_item_info(item):
                             initial_indent="  ", subsequent_indent="  "))
 
 
-def print_tree(collections, parent_key=None, prefix=""):
+def print_find_results(items, collections_map=None):
+    """
+    Like print_ls items section but includes collection path per item.
+    collections_map: dict of key → path string (optional).
+    """
+    for item in items:
+        data     = item.get("data", item)
+        label    = _item_label(data)
+        itype    = _c(DIM, data.get("itemType", ""))
+        creators = _fmt_creators(data.get("creators", []))
+        year     = (data.get("date", "") or "")[:4]
+        meta     = f"{creators} ({year})" if creators else year
+
+        if collections_map:
+            item_cols = data.get("collections", [])
+            col_path = ""
+            if item_cols:
+                col_path = collections_map.get(item_cols[0], "")
+            if col_path:
+                meta = f"{meta}  {_c(DIM, col_path)}"
+
+        print(f"{_c(CYAN, label)}\t{itype}\t{meta}")
+
+
+def print_tree(collections, parent_key=None, prefix="", depth=None, _current=0):
     """Recursive tree display rooted at parent_key."""
+    if depth is not None and _current >= depth:
+        return
     children = [
         col for col in collections
         if (col.get("data", col).get("parentCollection") or None) == parent_key
     ]
+    children = sorted(children, key=lambda c: c.get("data", c).get("name", "").lower())
     for i, col in enumerate(children):
         data    = col.get("data", col)
         name    = data.get("name", "")
@@ -161,9 +229,13 @@ def print_tree(collections, parent_key=None, prefix=""):
         connector = "└── " if is_last else "├── "
         print(f"{prefix}{connector}{_c(BOLD, name + '/')}")
         ext = "    " if is_last else "│   "
-        print_tree(collections, parent_key=data.get("key"), prefix=prefix + ext)
+        print_tree(collections, parent_key=data.get("key"), prefix=prefix + ext,
+                   depth=depth, _current=_current + 1)
 
 
 def error(msg):
     """Print an error to stderr."""
-    print(f"{RED}error:{NC} {msg}" if RED else f"error: {msg}", file=sys.stderr)
+    if sys.stderr.isatty():
+        print(f"\033[0;31merror:\033[0m {msg}", file=sys.stderr)
+    else:
+        print(f"error: {msg}", file=sys.stderr)

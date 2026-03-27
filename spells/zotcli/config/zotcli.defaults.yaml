@@ -1,0 +1,21 @@
+# zotcli default configuration
+# This file is committed to git. Do NOT edit — use config/zotcli.yaml for overrides.
+
+# Display
+ls:
+  default_sort: name       # name | date | type | creator
+  sort_reverse: false
+
+# Export
+get:
+  default_format: bibtex   # bibtex | json | bib
+  bib_style: apa           # any CSL style name
+
+# Cache
+cache:
+  ttl_seconds: 3600        # 1 hour
+
+# Visual mode
+visual:
+  enabled: true            # set to false to disable PS1 hook entirely
+  show_sync_age: true
