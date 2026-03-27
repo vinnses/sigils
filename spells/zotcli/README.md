@@ -22,6 +22,7 @@ zotcli get jurafsky2026 --bibtex  # export BibTeX
 zotcli cd jurafsky2026         # enter item, see attachments
 zotcli ls                      # list attachments/notes
 zotcli get jurafsky2026:0-FullBook  # download attachment
+zotcli --help                 # top-level help
 ```
 
 ## Root Symbol
@@ -56,6 +57,7 @@ zotcli get jurafsky2026:0-FullBook  # download attachment
 | `zotcli ls --sort <field>` | Sort by: `name` (default), `date`, `type`, `creator`. |
 | `zotcli ls --reverse` | Reverse sort order. |
 | `zotcli ls --unfiled` | At root: list items not in any collection. |
+| `zotcli ls --fields <csv>` | Choose output columns: `label,title,citation_key,author,year,type,meta,key`. |
 
 ### Reading
 
@@ -73,6 +75,7 @@ zotcli get jurafsky2026:0-FullBook  # download attachment
 | `zotcli find <pattern> --scope library` | Search entire library (server-side). |
 | `zotcli find --tag <tag>` | Filter by tag. Multiple `--tag` flags = AND. |
 | `zotcli find --type <itemType>` | Filter by item type (`book`, `journalArticle`, etc). |
+| `zotcli find --fields <csv>` | Choose output columns (same aliases as `ls --fields`). |
 
 ### Exporting
 
@@ -129,6 +132,12 @@ _update_prompt() {
 
     # ... rest of prompt ...
 }
+```
+
+If you prefer a copy/paste snippet from build tooling:
+
+```sh
+make -C spells/zotcli prompt
 ```
 
 Output example when active: `zot://1.Books [5m ago]`

@@ -94,7 +94,7 @@ _zotcli() {
 
     COMP_WORDBREAKS="$OLD_IFS"
 
-    local subcommands="cd pwd ls tree cat get find sync connect config py off"
+    local subcommands="cd pwd ls tree cat get find sync connect config py off help"
 
     # Find the subcommand (skip global flags)
     local subcmd=""
@@ -116,7 +116,7 @@ _zotcli() {
         cd|ls)
             if [[ "$cur" == -* ]]; then
                 [[ "$subcmd" == "ls" ]] && \
-                    COMPREPLY=($(compgen -W "--sort --reverse --unfiled" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--sort --reverse --unfiled --fields" -- "$cur"))
             else
                 compopt -o nospace 2>/dev/null
                 local IFS=$'\n'
@@ -139,7 +139,7 @@ _zotcli() {
 
         find)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--field --scope --tag --type" -- "$cur"))
+                COMPREPLY=($(compgen -W "--field --scope --tag --type --fields" -- "$cur"))
             elif [[ "$prev" == "--scope" ]]; then
                 COMPREPLY=($(compgen -W "collection library" -- "$cur"))
             fi

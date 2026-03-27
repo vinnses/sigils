@@ -174,6 +174,7 @@ def cmd_ls(args):
     sort_key = _config.get_value(cfg, "ls.default_sort") or "name"
     reverse  = _config.get_value(cfg, "ls.sort_reverse") or False
     unfiled  = False
+    fields_spec = None
 
     # Parse flags
     positional = []
@@ -191,9 +192,21 @@ def cmd_ls(args):
         elif args[i] == "--unfiled":
             unfiled = True
             i += 1
+        elif args[i] == "--fields" and i + 1 < len(args):
+            fields_spec = args[i + 1]
+            i += 2
+        elif args[i].startswith("--fields="):
+            fields_spec = args[i][9:]
+            i += 1
         else:
             positional.append(args[i])
             i += 1
+
+    try:
+        fields = _fmt.normalize_fields(fields_spec, context="ls")
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
 
     st = _state.read_state()
     collections = _collections()
@@ -217,7 +230,7 @@ def cmd_ls(args):
             if not it.get("data", it).get("collections")
             and it.get("data", it).get("itemType") not in ("attachment", "note")
         ]
-        _fmt.print_ls([], unfiled_items, sort_key=sort_key, reverse=reverse)
+        _fmt.print_ls([], unfiled_items, sort_key=sort_key, reverse=reverse, fields=fields)
         return
 
     if not positional:
@@ -227,7 +240,7 @@ def cmd_ls(args):
         zot        = _zot()
         items      = _fetch_items(zot, target_key)
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
-                      current_collection_key=target_key)
+                      current_collection_key=target_key, fields=fields)
         return
 
     ref = positional[0]
@@ -244,7 +257,7 @@ def cmd_ls(args):
         zot      = _zot()
         items    = _fetch_items(zot, target_key)
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
-                      current_collection_key=target_key)
+                      current_collection_key=target_key, fields=fields)
     except ValueError:
         # Not a collection — treat as item reference, list children
         zot   = _zot()
@@ -446,7 +459,7 @@ def cmd_get(args):
 
 def cmd_find(args):
     if not args:
-        print("Usage: zotcli find <pattern> [--field <f>] [--scope library] [--tag <tag>] [--type <type>]",
+        print("Usage: zotcli find <pattern> [--field <f>] [--scope library] [--tag <tag>] [--type <type>] [--fields <csv>]",
               file=sys.stderr)
         sys.exit(1)
 
@@ -457,6 +470,7 @@ def cmd_find(args):
     scope      = "collection"
     tags       = []
     item_type  = None
+    out_fields = None
 
     i = 0
     while i < len(args):
@@ -484,11 +498,23 @@ def cmd_find(args):
         elif args[i].startswith("--type="):
             item_type = args[i][7:]
             i += 1
+        elif args[i] == "--fields" and i + 1 < len(args):
+            out_fields = args[i + 1]
+            i += 2
+        elif args[i].startswith("--fields="):
+            out_fields = args[i][9:]
+            i += 1
         elif not args[i].startswith("-"):
             pattern = args[i]
             i += 1
         else:
             i += 1
+
+    try:
+        fields = _fmt.normalize_fields(out_fields, context="find")
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
 
     st = _state.read_state()
 
@@ -512,7 +538,7 @@ def cmd_find(args):
             data = col.get("data", col)
             col_map[data.get("key", "")] = _nav.build_path(collections, data.get("key"))
 
-        _fmt.print_find_results(results, collections_map=col_map)
+        _fmt.print_find_results(results, collections_map=col_map, fields=fields)
     else:
         zot   = _zot()
         items = _fetch_items(zot, st["collection_key"])
@@ -521,7 +547,7 @@ def cmd_find(args):
                                                item_type=item_type)
         results = _finder.find_in_collection(items, pattern=pattern, field=field,
                                              item_type=item_type if not tags else None)
-        _fmt.print_find_results(results)
+        _fmt.print_find_results(results, fields=fields)
 
 
 def cmd_connect(args):
@@ -614,6 +640,23 @@ def cmd_config(args):
     dotpath, value = args[0], args[1]
     _config.set_value(dotpath, value)
     print(f"Set {dotpath} = {value}")
+
+
+def cmd_help(args):
+    print("""Usage: zotcli <command> [args]
+
+Navigation:  cd [path]  pwd  tree [--depth N] [--no-items]
+Listing:     ls [path] [--sort <f>] [--reverse] [--unfiled] [--fields <csv>]
+Reading:     cat <item>[:<child>]
+Searching:   find <pattern> [--field <f>] [--scope library] [--tag <t>] [--type <t>] [--fields <csv>]
+Exporting:   get <item> [--bibtex|--json|--bib] [--style <csl>]
+             get <item>:<child> [-o <path>]
+Setup:       connect  sync  off  config [key [value]]
+Python:      py  py -c '<code>'  py <script.py>
+
+Field aliases for --fields: label, title, citation_key (ck), author (creator), year, type, meta, key
+Global flags: --fresh
+""")
 
 
 # ---------------------------------------------------------------------------
@@ -712,6 +755,9 @@ COMMANDS = {
     "sync":         cmd_sync,
     "off":          cmd_off,
     "config":       cmd_config,
+    "help":         cmd_help,
+    "--help":       cmd_help,
+    "-h":           cmd_help,
     # Hidden
     "_complete":    cmd__complete,
     "_spell_dir":   cmd__spell_dir,
