@@ -1,32 +1,27 @@
 #!/usr/bin/env bash
 # zotcli shell integration (v3)
-# Provides: shell wrapper function, PS1 hook, tab completions, zot() alias.
+# Provides: shell wrapper, __zotcli_ps1, tab completions, zot() alias.
 #
-# Sourced automatically by the sigils init system from:
-#   spells/*/completions/bash/*.bash
+# Sourced automatically by the sigils init system.
 
 # ---------------------------------------------------------------------------
-# Shell wrapper — captures env var exports, manages visual mode
+# Shell wrapper — captures env var exports, forces colors, activates visual mode
 # ---------------------------------------------------------------------------
 
 zotcli() {
-    # Special handling for 'off': deactivate everything, then reset state
+    # 'off': reset state + clear visual env vars
     if [[ "${1:-}" == "off" ]]; then
-        command zotcli off "${@:2}"
+        ZOTCLI_COLOR=1 command zotcli off "${@:2}"
         unset ZOTCLI_VISUAL ZOTCLI_PATH ZOTCLI_SYNC_AGE
-        if [[ -n "${PROMPT_COMMAND:-}" ]]; then
-            PROMPT_COMMAND="${PROMPT_COMMAND//__zotcli_hook;/}"
-            PROMPT_COMMAND="${PROMPT_COMMAND//;__zotcli_hook/}"
-        fi
         return 0
     fi
 
-    # Capture stdout; stderr flows through to terminal naturally
+    # ZOTCLI_COLOR=1 forces ANSI codes even though stdout is a pipe
     local output exitcode
-    output=$(command zotcli "$@")
+    output=$(ZOTCLI_COLOR=1 command zotcli "$@")
     exitcode=$?
 
-    # Separate __ZOTCLI_ENV__ lines from display output
+    # Parse __ZOTCLI_ENV__ lines; print the rest
     local line
     while IFS= read -r line; do
         if [[ "$line" == __ZOTCLI_ENV__* ]]; then
@@ -36,12 +31,9 @@ zotcli() {
         fi
     done <<< "$output"
 
-    # Auto-activate visual mode on first command
+    # Mark visual mode as active on first use (sets ZOTCLI_VISUAL=1)
     if [[ -z "${ZOTCLI_VISUAL:-}" ]]; then
         export ZOTCLI_VISUAL=1
-        if [[ ";${PROMPT_COMMAND[*]:-};" != *";__zotcli_hook;"* ]]; then
-            PROMPT_COMMAND="__zotcli_hook;${PROMPT_COMMAND:-}"
-        fi
     fi
 
     return $exitcode
@@ -50,19 +42,26 @@ zotcli() {
 zot() { zotcli "$@"; }
 
 # ---------------------------------------------------------------------------
-# PS1 hook — prints Zotero context line above the prompt
+# PS1 helper — like __git_ps1, outputs formatted string when active
+#
+# Usage in PS1:
+#   PS1+='$(__zotcli_ps1 " [%s]")'
+#
+# Usage via PROMPT_COMMAND (updates a variable, zero subshell cost):
+#   PROMPT_COMMAND+='PS1_ZOTCLI=$(__zotcli_ps1 " [%s]")'
+#   PS1+='${PS1_ZOTCLI}'
 # ---------------------------------------------------------------------------
 
-__zotcli_hook() {
-    local prev=$?
-    if [[ "${ZOTCLI_VISUAL:-}" == "1" ]]; then
-        local path="${ZOTCLI_PATH:-^}"
-        local sync="${ZOTCLI_SYNC_AGE:-}"
-        local info="\033[2m(zot)\033[0m $path"
-        [[ -n "$sync" ]] && info+="  \033[2m[synced $sync]\033[0m"
-        echo -e "$info" >&2
-    fi
-    return $prev
+__zotcli_ps1() {
+    # Only output when zotcli has been used in this session
+    [[ "${ZOTCLI_VISUAL:-}" != "1" ]] && return
+
+    local fmt="${1:-%s}"
+    local path="${ZOTCLI_PATH:-zot://}"
+    local sync="${ZOTCLI_SYNC_AGE:-}"
+    local info="$path"
+    [[ -n "$sync" ]] && info+=" [${sync}]"
+    printf -- "$fmt" "$info"
 }
 
 # ---------------------------------------------------------------------------
@@ -70,6 +69,10 @@ __zotcli_hook() {
 # ---------------------------------------------------------------------------
 
 _zotcli() {
+    # Temporarily remove ':' from COMP_WORDBREAKS so zot:// isn't split
+    local OLD_IFS="$COMP_WORDBREAKS"
+    COMP_WORDBREAKS="${COMP_WORDBREAKS//:}"
+
     local cur prev words cword
     _init_completion 2>/dev/null || {
         cur="${COMP_WORDS[COMP_CWORD]}"
@@ -78,9 +81,11 @@ _zotcli() {
         cword=$COMP_CWORD
     }
 
+    COMP_WORDBREAKS="$OLD_IFS"
+
     local subcommands="cd pwd ls tree cat get find sync connect config py off"
 
-    # Find the subcommand (skip --fresh and other flags)
+    # Find the subcommand (skip global flags)
     local subcmd=""
     local i
     for ((i = 1; i < cword; i++)); do
@@ -90,44 +95,35 @@ _zotcli() {
         esac
     done
 
-    # No subcommand yet — complete subcommand names and global flags
     if [[ -z "$subcmd" ]]; then
         COMPREPLY=($(compgen -W "$subcommands --fresh" -- "$cur"))
         return
     fi
 
-    # -----------------------------------------------------------------------
-    # Subcommand-specific completions
-    # -----------------------------------------------------------------------
     case "$subcmd" in
 
         cd|ls)
-            # Delegate to zotcli _complete which reads the cache (no API calls)
             if [[ "$cur" == -* ]]; then
-                if [[ "$subcmd" == "ls" ]]; then
+                [[ "$subcmd" == "ls" ]] && \
                     COMPREPLY=($(compgen -W "--sort --reverse --unfiled" -- "$cur"))
-                fi
             else
                 compopt -o nospace 2>/dev/null
                 local IFS=$'\n'
                 local results
-                results=$(command zotcli _complete "$cur" 2>/dev/null)
+                results=$(SPELL_DIR="${SPELL_DIR:-}" command zotcli _complete "$cur" 2>/dev/null)
                 COMPREPLY=()
                 while IFS=$'\t' read -r completion _type; do
                     [[ -n "$completion" ]] && COMPREPLY+=("$completion")
                 done <<< "$results"
-
-                # cd-only special tokens
                 if [[ "$subcmd" == "cd" ]]; then
-                    COMPREPLY+=($(compgen -W "^ .. -" -- "$cur"))
+                    COMPREPLY+=($(compgen -W "zot:// .. -" -- "$cur"))
                 fi
             fi
             ;;
 
         get)
-            if [[ "$cur" == -* ]]; then
+            [[ "$cur" == -* ]] && \
                 COMPREPLY=($(compgen -W "--bibtex --json --bib --style -o" -- "$cur"))
-            fi
             ;;
 
         find)
@@ -139,13 +135,11 @@ _zotcli() {
             ;;
 
         tree)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--depth" -- "$cur"))
-            fi
+            [[ "$cur" == -* ]] && \
+                COMPREPLY=($(compgen -W "--depth --no-items" -- "$cur"))
             ;;
 
         config)
-            # Complete known config keys
             COMPREPLY=($(compgen -W \
                 "ls.default_sort ls.sort_reverse get.default_format get.bib_style cache.ttl_seconds visual.enabled visual.show_sync_age" \
                 -- "$cur"))
@@ -155,12 +149,10 @@ _zotcli() {
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "-c" -- "$cur"))
             else
-                # Complete .py files
                 COMPREPLY=($(compgen -f -X '!*.py' -- "$cur"))
             fi
             ;;
 
-        # pwd, tree, cat, connect, sync, off: no argument completions
     esac
 }
 

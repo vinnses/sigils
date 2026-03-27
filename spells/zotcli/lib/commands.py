@@ -259,7 +259,8 @@ def cmd_ls(args):
 
 
 def cmd_tree(args):
-    depth = None
+    depth      = None
+    show_items = True   # items shown by default; --no-items to skip
     i = 0
     while i < len(args):
         if args[i] == "--depth" and i + 1 < len(args):
@@ -273,15 +274,19 @@ def cmd_tree(args):
             try:
                 depth = int(args[i][8:])
             except ValueError:
-                _fmt.error(f"--depth must be an integer")
+                _fmt.error("--depth must be an integer")
                 sys.exit(1)
+            i += 1
+        elif args[i] == "--no-items":
+            show_items = False
             i += 1
         else:
             i += 1
 
     st = _state.read_state()
     collections = _collections()
-    _fmt.print_tree(collections, parent_key=st["collection_key"], depth=depth)
+    zot = _zot() if show_items else None
+    _fmt.print_tree(collections, parent_key=st["collection_key"], depth=depth, zot=zot)
 
 
 def cmd_cat(args):
@@ -620,60 +625,64 @@ def cmd__complete(args):
     Fast completion helper — reads collection cache only, never calls the API.
     Output: completion_string TAB type, one per line.
 
-    Usage:
-      zotcli _complete                 → collections at current state level
-      zotcli _complete Pa              → collections starting with "Pa"
-      zotcli _complete ^/Books/        → collections inside ^/Books
-      zotcli _complete ^/Bo            → top-level collections starting with "Bo"
+    Handles both absolute (zot:// or z://) and relative paths.
     """
     cached = _cache.load_cache()
     if not cached:
-        return  # No completions without a warm cache — fail silently
+        return
 
     collections = cached.get("collections", [])
     st          = _state.read_state()
     path_arg    = args[0] if args else ""
+
+    ROOT = _nav.ROOT  # "zot://"
 
     if not path_arg:
         parent_key  = st.get("collection_key")
         prefix      = ""
         path_prefix = ""
 
-    elif path_arg.startswith("^/") or path_arg == "^":
-        if path_arg in ("^", "^/"):
-            parent_key  = None
-            prefix      = ""
-            path_prefix = "^/"
-        elif path_arg.endswith("/"):
-            try:
-                col_key, _, _, _ = _nav.resolve_path(
-                    None, "^", path_arg.rstrip("/"), collections
-                )
-                parent_key = col_key
-            except ValueError:
-                return
-            prefix      = ""
-            path_prefix = path_arg
-        else:
-            parent_path, _, partial = path_arg.rpartition("/")
-            if parent_path in ("^", ""):
-                parent_key = None
-            else:
-                try:
-                    col_key, _, _, _ = _nav.resolve_path(
-                        None, "^", parent_path, collections
-                    )
-                    parent_key = col_key
-                except ValueError:
-                    return
-            prefix      = partial
-            path_prefix = parent_path + "/"
-
     else:
-        # Relative path
-        parent_key  = st.get("collection_key")
-        prefix      = path_arg
-        path_prefix = ""
+        is_abs, rest = _nav._strip_root_prefix(path_arg)
+        if is_abs:
+            if not rest or path_arg.endswith("/"):
+                # Complete children of the resolved parent
+                if not rest:
+                    parent_key = None
+                else:
+                    resolved_path = path_arg.rstrip("/")
+                    try:
+                        col_key, _, _, _ = _nav.resolve_path(
+                            None, ROOT, resolved_path, collections
+                        )
+                        parent_key = col_key
+                    except ValueError:
+                        return
+                prefix      = ""
+                path_prefix = path_arg if path_arg.endswith("/") else path_arg + "/"
+                # normalise path_prefix to use canonical ROOT
+                for pfx in _nav._ROOT_PREFIXES:
+                    if path_prefix.startswith(pfx):
+                        path_prefix = ROOT + path_prefix[len(pfx):]
+                        break
+            else:
+                parent_path, _, partial = rest.rpartition("/")
+                if not parent_path:
+                    parent_key = None
+                else:
+                    try:
+                        col_key, _, _, _ = _nav.resolve_path(
+                            None, ROOT, ROOT + parent_path, collections
+                        )
+                        parent_key = col_key
+                    except ValueError:
+                        return
+                prefix      = partial
+                path_prefix = ROOT + (parent_path + "/" if parent_path else "")
+        else:
+            parent_key  = st.get("collection_key")
+            prefix      = path_arg
+            path_prefix = ""
 
     children = _nav.get_children(collections, parent_key)
     for col in children:

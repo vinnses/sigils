@@ -2,9 +2,54 @@
 navigator.py — path resolution and collection tree traversal.
 Pure functions, no state or I/O.
 
-Root symbol: ^ (replaces ~)
+Root URI: zot://
+Shortcuts: z://
 """
 
+ROOT = "zot://"
+_ROOT_PREFIXES = ("zot://", "z://")
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+def _is_root(path):
+    return path == ROOT
+
+
+def _path_join(parent, name):
+    """Join a parent path with a new segment: zot:// + Books = zot://Books"""
+    if _is_root(parent):
+        return ROOT + name
+    return parent + "/" + name
+
+
+def _path_up(path):
+    """
+    Go one level up. Returns ROOT if already at top-level child.
+    e.g.  zot://Books/AI  →  zot://Books
+          zot://Books      →  zot://
+    """
+    suffix = path[len(ROOT):]   # everything after "zot://"
+    if "/" not in suffix:
+        return ROOT
+    return path.rsplit("/", 1)[0]
+
+
+def _strip_root_prefix(path_string):
+    """Return (is_absolute, rest) stripping any recognised root prefix."""
+    for prefix in _ROOT_PREFIXES:
+        if path_string == prefix:
+            return True, ""
+        if path_string.startswith(prefix):
+            return True, path_string[len(prefix):]
+    return False, path_string
+
+
+# ---------------------------------------------------------------------------
+# Collection tree helpers
+# ---------------------------------------------------------------------------
 
 def get_children(collections, parent_key):
     """Return direct children of parent_key. Use None for top-level."""
@@ -37,9 +82,9 @@ def get_collection_by_key(collections, key):
 
 
 def build_path(collections, key):
-    """Build the full ^ path string for a collection key."""
+    """Build the full zot:// path string for a collection key."""
     if key is None:
-        return "^"
+        return ROOT
     parts = []
     cur = key
     while cur:
@@ -50,8 +95,12 @@ def build_path(collections, key):
         parts.append(data.get("name", cur))
         cur = data.get("parentCollection") or None
     parts.reverse()
-    return "^/" + "/".join(parts)
+    return ROOT + "/".join(parts)
 
+
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
 
 def resolve_path(current_key, current_path, path_string, collections,
                  items=None, item_key=None,
@@ -63,33 +112,28 @@ def resolve_path(current_key, current_path, path_string, collections,
     Returns (collection_key, collection_path, new_item_key, new_item_label).
 
     Supported forms:
-      ^             root
-      ^/foo/bar     absolute from root
-      foo           child named foo in current level (collection or item)
-      ../foo        up then down
-      ..            parent (from item: back to collection; from collection: up)
-      -             previous location
-
-    When items is provided and a path segment matches an item (by citation key,
-    item key, or title) but not a subcollection, the resolution enters the item.
+      zot://          root (also: z://)
+      zot://foo/bar   absolute path (also: z://foo/bar)
+      foo             relative name in current level
+      ..              parent (from item: back to collection)
+      -               previous location
     """
     if path_string == "-":
         if previous_path is None:
             raise ValueError("No previous location")
         return previous_key, previous_path, previous_item_key, None
 
-    if path_string in ("", "^"):
-        return None, "^", None, None
+    is_abs, rest = _strip_root_prefix(path_string)
 
-    if path_string.startswith("^/"):
-        parts = [p for p in path_string[2:].split("/") if p]
-        col_key, col_path = _traverse_collections(None, "^", parts, collections)
+    if is_abs:
+        if not rest:
+            return None, ROOT, None, None
+        parts = [p for p in rest.split("/") if p]
+        col_key, col_path = _traverse_collections(None, ROOT, parts, collections)
         return col_key, col_path, None, None
 
-    if path_string.startswith("/"):
-        parts = [p for p in path_string[1:].split("/") if p]
-        col_key, col_path = _traverse_collections(None, "^", parts, collections)
-        return col_key, col_path, None, None
+    if path_string in ("", ):
+        return None, ROOT, None, None
 
     # Relative path
     parts = [p for p in path_string.split("/") if p]
@@ -100,13 +144,12 @@ def resolve_path(current_key, current_path, path_string, collections,
 def _traverse(start_key, start_path, parts, collections,
               items=None, current_item_key=None):
     """
-    Traverse a relative path from (start_key, start_path).
-    Returns (col_key, col_path, item_key, item_label).
+    Traverse a relative path. Returns (col_key, col_path, item_key, item_label).
     """
-    key       = start_key
-    path      = start_path
-    item_key  = current_item_key
-    item_lbl  = None
+    key      = start_key
+    path     = start_path
+    item_key = current_item_key
+    item_lbl = None
 
     for part in parts:
         if part == ".":
@@ -114,22 +157,16 @@ def _traverse(start_key, start_path, parts, collections,
 
         if part == "..":
             if item_key is not None:
-                # Inside an item: go back to containing collection
                 item_key = None
                 item_lbl = None
-                # path stays as collection path
             elif key is None:
-                raise ValueError("Already at root (^)")
+                raise ValueError(f"Already at root ({ROOT})")
             else:
                 parent = get_parent_key(collections, key)
-                key = parent
-                if parent is None:
-                    path = "^"
-                else:
-                    path = path.rsplit("/", 1)[0] if "/" in path else "^"
+                key    = parent
+                path   = _path_up(path) if parent is not None else ROOT
             continue
 
-        # If we're inside an item, we can't go deeper (children are leaves)
         if item_key is not None:
             raise ValueError(
                 f"Cannot navigate into '{part}': already inside an item. "
@@ -145,7 +182,7 @@ def _traverse(start_key, start_path, parts, collections,
         if match_col is not None:
             data = match_col.get("data", match_col)
             key  = data["key"]
-            path = f"{path}/{part}" if path != "^" else f"^/{part}"
+            path = _path_join(path, part)
             continue
 
         # Try item (if items list provided)
@@ -155,7 +192,6 @@ def _traverse(start_key, start_path, parts, collections,
                 idata    = match_item.get("data", match_item)
                 item_key = idata["key"]
                 item_lbl = _item_label(idata)
-                # Collection key and path stay as-is
                 continue
 
         avail = sorted(c.get("data", c).get("name", "") for c in children_cols)
@@ -171,7 +207,7 @@ def _traverse(start_key, start_path, parts, collections,
 
 
 def _traverse_collections(start_key, start_path, parts, collections):
-    """Traverse only through collections (for absolute paths). Returns (key, path)."""
+    """Traverse only through collections (absolute paths). Returns (key, path)."""
     key  = start_key
     path = start_path
 
@@ -180,12 +216,10 @@ def _traverse_collections(start_key, start_path, parts, collections):
             continue
         if part == "..":
             if key is None:
-                raise ValueError("Already at root (^)")
+                raise ValueError(f"Already at root ({ROOT})")
             parent = get_parent_key(collections, key)
-            key = parent
-            path = path.rsplit("/", 1)[0] if "/" in path else "^"
-            if key is None:
-                path = "^"
+            key    = parent
+            path   = _path_up(path) if parent is not None else ROOT
             continue
 
         children = get_children(collections, key)
@@ -204,27 +238,25 @@ def _traverse_collections(start_key, start_path, parts, collections):
             )
         data = match.get("data", match)
         key  = data["key"]
-        path = f"{path}/{part}" if path != "^" else f"^/{part}"
+        path = _path_join(path, part)
 
     return key, path
 
 
+# ---------------------------------------------------------------------------
+# Item helpers
+# ---------------------------------------------------------------------------
+
 def _find_item_by_ref(items, ref):
-    """
-    Find an item by citation key, item key, or exact title.
-    Returns the item dict or None.
-    """
-    # Citation key
+    """Find item by citation key, item key, or exact title. Returns dict or None."""
     for item in items:
         data = item.get("data", item)
         ck = _get_citation_key(data)
         if ck and ck == ref:
             return item
-    # Item key
     for item in items:
         if item.get("data", item).get("key") == ref:
             return item
-    # Exact title
     for item in items:
         if item.get("data", item).get("title", "") == ref:
             return item

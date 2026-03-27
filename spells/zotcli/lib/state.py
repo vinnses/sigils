@@ -12,9 +12,11 @@ SPELL_DIR = os.environ.get(
 )
 STATE_FILE = os.path.join(SPELL_DIR, "data", "state.json")
 
+ROOT = "zot://"
+
 _DEFAULT = {
     "collection_key": None,
-    "collection_path": "^",
+    "collection_path": ROOT,
     "item_key": None,
     "item_label": None,
     "previous_collection_key": None,
@@ -37,7 +39,6 @@ def write_state(**fields):
     """Atomically write navigation state to disk."""
     current = read_state()
     current.update(fields)
-    # Ensure all default keys are present
     for k, v in _DEFAULT.items():
         current.setdefault(k, v)
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -57,7 +58,7 @@ def write_state(**fields):
 
 
 def reset_state():
-    """Write default (root) state."""
+    """Write default (root) state atomically."""
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     dir_ = os.path.dirname(STATE_FILE)
     fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
@@ -75,8 +76,8 @@ def reset_state():
 
 
 def full_path(state):
-    """Return display path string: '^/1.Books' or '^/1.Books/jurafsky2026'."""
-    base = state.get("collection_path") or "^"
+    """Return display path: 'zot://1.Books' or 'zot://1.Books/jurafsky2026'."""
+    base = state.get("collection_path") or ROOT
     item_label = state.get("item_label")
     if item_label:
         return f"{base}/{item_label}"
