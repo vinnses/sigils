@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# arcane — batch Docker Compose operations across the arcane repository
+
+set -euo pipefail
+
+SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${SPELL_DIR}/lib/core.bash"
+
+_arcane_usage() {
+    cat <<'EOF'
+Usage: arcane <subcommand> [projects...] [--exclude|-e excludes...] [--device|-d device]
+
+Subcommands:
+  up        Start services (docker compose up -d)
+  down      Stop services (docker compose down)
+  pull      Pull images and restart (pull + up -d)
+  restart   Full restart (down + pull + up -d)
+  clean     Remove services and images (down --rmi all)
+  status    Show service status (docker compose ps)
+  dump      Backup all .env files to encrypted 7z archive
+  restore   Restore .env files from 7z archive
+
+Options:
+  -d, --device <name>     Target device (default: hostname)
+  -e, --exclude <names>   Exclude projects from batch operation
+
+Environment:
+  ARCANE_DIR   Arcane repository path (default: ~/arcane)
+EOF
+}
+
+case "${1:-}" in
+    up)
+        shift
+        _arcane_each "docker compose up -d" "$@"
+        ;;
+    down)
+        shift
+        _arcane_each "docker compose down" "$@"
+        ;;
+    pull)
+        shift
+        _arcane_each "docker compose pull && docker compose up -d" "$@"
+        ;;
+    restart)
+        shift
+        _arcane_each "docker compose down && docker compose pull && docker compose up -d" "$@"
+        ;;
+    clean)
+        shift
+        _arcane_each "docker compose down --rmi all" "$@"
+        ;;
+    status)
+        shift
+        _arcane_each "docker compose ps" "$@"
+        ;;
+    dump)
+        _arcane_dump
+        ;;
+    restore)
+        shift
+        if [[ $# -lt 1 ]]; then
+            echo "error: restore requires an archive path" >&2
+            exit 1
+        fi
+        _arcane_restore "$1"
+        ;;
+    --help|-h|help)
+        _arcane_usage
+        ;;
+    "")
+        _arcane_usage
+        exit 1
+        ;;
+    *)
+        echo "error: unknown subcommand: $1" >&2
+        _arcane_usage
+        exit 1
+        ;;
+esac
