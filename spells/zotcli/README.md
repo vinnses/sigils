@@ -111,18 +111,31 @@ Auto-imports are configured in `config/imports.py`.
 |---|---|
 | `--fresh` | Bypass cache for this invocation, fetch directly from API. |
 
-## Visual Mode
+## Visual Mode (PS1 Integration)
 
-Any `zotcli` command automatically activates a PS1 hook showing the current Zotero path and sync age above your prompt:
+`__zotcli_ps1` works like `git_status` — it outputs the current Zotero path when active, nothing when zotcli hasn't been used. Add it to your `_update_prompt`:
 
+```bash
+_update_prompt() {
+    local EXIT_CODE=$?
+    # ... existing prompt logic ...
+
+    # Zotero context — only shows after first zotcli command in session
+    local zot_info="$(__zotcli_ps1)"
+    if [[ -n "$zot_info" ]]; then
+        local C_ZOT='\[\e[36m\]'
+        PS1+="${C_ZOT}${zot_info}${C_RESET} "
+    fi
+
+    # ... rest of prompt ...
+}
 ```
-(zot) ^/1.Books  [synced 12m ago]
-user@host:~/projects $
-```
 
-`zotcli off` removes the hook and resets navigation to root.
+Output example when active: `zot://1.Books [5m ago]`
 
-Requires sourcing `completions/bash/zotcli.bash` in your shell (done automatically by the sigils init system).
+`zotcli off` clears `ZOTCLI_VISUAL` and resets navigation to root — the prompt info disappears.
+
+Requires sourcing `completions/bash/zotcli.bash` (done automatically by the sigils init system).
 
 ## Configuration
 

@@ -42,18 +42,29 @@ zotcli() {
 zot() { zotcli "$@"; }
 
 # ---------------------------------------------------------------------------
-# PS1 helper — like __git_ps1, outputs formatted string when active
+# PS1 helper — like git_status, returns info string when zotcli is active
 #
-# Usage in PS1:
+# Returns nothing (empty) when ZOTCLI_VISUAL != 1, so it naturally
+# disappears when zotcli hasn't been used in this session.
+#
+# Integration with _update_prompt style prompts:
+#
+#   _update_prompt() {
+#       local EXIT_CODE=$?
+#       ...
+#       local zot_info="$(__zotcli_ps1)"
+#       if [[ -n "$zot_info" ]]; then
+#           local C_ZOT='\[\e[36m\]'
+#           PS1+="${C_ZOT}${zot_info}${C_RESET} "
+#       fi
+#       ...
+#   }
+#
+# Or inline in PS1 (simpler but runs a subshell each prompt):
 #   PS1+='$(__zotcli_ps1 " [%s]")'
-#
-# Usage via PROMPT_COMMAND (updates a variable, zero subshell cost):
-#   PROMPT_COMMAND+='PS1_ZOTCLI=$(__zotcli_ps1 " [%s]")'
-#   PS1+='${PS1_ZOTCLI}'
 # ---------------------------------------------------------------------------
 
 __zotcli_ps1() {
-    # Only output when zotcli has been used in this session
     [[ "${ZOTCLI_VISUAL:-}" != "1" ]] && return
 
     local fmt="${1:-%s}"
