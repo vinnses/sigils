@@ -52,10 +52,11 @@ def _emit_state_env(st):
     _emit_env(ZOTCLI_PATH=path)
 
 
-def _emit_sync_age():
-    """Emit ZOTCLI_SYNC_AGE after a cache operation."""
+def _print_sync_footer():
+    """Print sync age footer after listing commands."""
     age = _cache.sync_age_human()
-    _emit_env(ZOTCLI_SYNC_AGE=age)
+    if age:
+        _fmt.print_sync_footer(age)
 
 
 def _fetch_items(zot, col_key):
@@ -116,14 +117,14 @@ def _parse_ref(ref):
 
 
 def _completion_item_label(item_data):
-    """Best-effort completion label: citation key, item key, or title."""
+    """Best-effort completion label: citation key, title, or item key."""
     ck = _fmt.get_citation_key(item_data)
     if ck:
         return ck
-    key = item_data.get("key", "")
-    if key:
-        return key
-    return item_data.get("title", "")
+    title = item_data.get("title", "")
+    if title:
+        return title
+    return item_data.get("key", "")
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +171,6 @@ def cmd_cd(args):
         previous_item_key=st.get("item_key"),
     )
     new_st = _state.read_state()
-    display = _state.full_path(new_st)
-    print(display)
     _emit_state_env(new_st)
     _maybe_auto_activate()
 
@@ -214,6 +213,10 @@ def cmd_ls(args):
             positional.append(args[i])
             i += 1
 
+    # Use config default fields if --fields not specified
+    if not fields_spec:
+        fields_spec = _config.get_value(cfg, "ls.default_fields")
+
     try:
         fields = _fmt.normalize_fields(fields_spec, context="ls")
     except ValueError as e:
@@ -243,6 +246,7 @@ def cmd_ls(args):
             and it.get("data", it).get("itemType") not in ("attachment", "note")
         ]
         _fmt.print_ls([], unfiled_items, sort_key=sort_key, reverse=reverse, fields=fields)
+        _print_sync_footer()
         return
 
     if not positional:
@@ -253,6 +257,7 @@ def cmd_ls(args):
         items      = _fetch_items(zot, target_key)
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
                       current_collection_key=target_key, fields=fields)
+        _print_sync_footer()
         return
 
     ref = positional[0]
@@ -270,6 +275,7 @@ def cmd_ls(args):
         items    = _fetch_items(zot, target_key)
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
                       current_collection_key=target_key, fields=fields)
+        _print_sync_footer()
     except ValueError:
         # Not a collection — treat as item reference, list children
         zot   = _zot()
@@ -321,6 +327,16 @@ def cmd_cat(args):
 
     st = _state.read_state()
     item_ref, child_ref = _parse_ref(args[0])
+
+    # '.' means current item
+    if item_ref == "." and child_ref is None:
+        if not st.get("item_key"):
+            _fmt.error("Not inside an item. Use 'zot cd <item>' first.")
+            sys.exit(1)
+        zot = _zot()
+        item = zot.item(st["item_key"])
+        _fmt.print_item_info(item)
+        return
 
     # If inside an item and ref looks like a child, resolve from current item
     if st.get("item_key") and child_ref is None:
@@ -445,6 +461,10 @@ def cmd_get(args):
                 print(result if isinstance(result, str) else result.decode())
             else:
                 print(result)
+        except AttributeError:
+            _fmt.error("BibTeX export failed (bibtexparser/pyparsing version conflict).\n"
+                       "  Try: zotcli get --json " + item_ref)
+            sys.exit(1)
         finally:
             zot.add_parameters(format="json")
         return
@@ -551,6 +571,7 @@ def cmd_find(args):
             col_map[data.get("key", "")] = _nav.build_path(collections, data.get("key"))
 
         _fmt.print_find_results(results, collections_map=col_map, fields=fields)
+        _print_sync_footer()
     else:
         zot   = _zot()
         items = _fetch_items(zot, st["collection_key"])
@@ -560,6 +581,7 @@ def cmd_find(args):
         results = _finder.find_in_collection(items, pattern=pattern, field=field,
                                              item_type=item_type if not tags else None)
         _fmt.print_find_results(results, fields=fields)
+        _print_sync_footer()
 
 
 def cmd_connect(args):
@@ -620,34 +642,34 @@ def cmd_sync(args):
     _cache.invalidate()
     collections = _cache.get_collections(fresh=True)
     print(f"Synced {len(collections)} collections.", file=sys.stderr)
-    _emit_sync_age()
+    _print_sync_footer()
 
 
-def _prompt_color_code():
-    """Return the ANSI escape for the configured prompt color."""
+def _visual_color_code():
+    """Return the ANSI escape for the configured visual color."""
     cfg = _config.load_config()
-    color_name = _config.get_value(cfg, "prompt.color") or "cyan"
+    color_name = _config.get_value(cfg, "visual.color") or "cyan"
     return _ANSI_COLORS.get(color_name.lower(), "\\e[36m")
 
 
 def _maybe_auto_activate():
-    """Emit prompt activation if prompt.auto is enabled and not already active."""
+    """Emit visual activation if visual.auto is enabled and not already active."""
     if os.environ.get("ZOTCLI_VISUAL") == "1":
         return
     cfg = _config.load_config()
-    auto = _config.get_value(cfg, "prompt.auto")
+    auto = _config.get_value(cfg, "visual.auto")
     if auto is False:
         return
-    _emit_env(ZOTCLI_VISUAL="1", ZOTCLI_PROMPT_COLOR=_prompt_color_code())
+    _emit_env(ZOTCLI_VISUAL="1", ZOTCLI_PROMPT_COLOR=_visual_color_code())
 
 
-def cmd_prompt(args):
-    """Activate/deactivate the prompt display.
+def cmd_visual(args):
+    """Activate/deactivate the visual mode (PS1 path display).
 
     Usage:
-      zotcli prompt --on [--color <name>]   Activate prompt
-      zotcli prompt --off                   Deactivate prompt
-      zotcli prompt                         Toggle
+      zotcli visual --on [--color <name>]   Activate visual mode
+      zotcli visual --off                   Deactivate visual mode
+      zotcli visual                         Toggle
     """
     color_name = None
     activate = None
@@ -674,7 +696,7 @@ def cmd_prompt(args):
         activate = os.environ.get("ZOTCLI_VISUAL") != "1"
 
     if activate:
-        color_code = _prompt_color_code()
+        color_code = _visual_color_code()
         if color_name:
             code = _ANSI_COLORS.get(color_name.lower())
             if code is None:
@@ -684,25 +706,24 @@ def cmd_prompt(args):
 
         _emit_env(ZOTCLI_VISUAL="1", ZOTCLI_PROMPT_COLOR=color_code)
 
-        # Also emit current path/sync so the prompt shows immediately
+        # Also emit current path so the prompt shows immediately
         st = _state.read_state()
         _emit_state_env(st)
-        _emit_sync_age()
     else:
         _emit_env(ZOTCLI_VISUAL="", ZOTCLI_PATH="",
-                  ZOTCLI_SYNC_AGE="", ZOTCLI_PROMPT_COLOR="")
+                  ZOTCLI_PROMPT_COLOR="")
 
 
 def cmd_off(args):
     """Deactivate visual mode and reset navigation state to root.
 
-    DEPRECATED: Use 'zotcli prompt --off' to hide the prompt,
+    DEPRECATED: Use 'zotcli visual --off' to hide the prompt,
     or 'zotcli cd ^' to go to root.
     """
-    print("[deprecated] Use 'zot prompt --off' + 'zot cd ^' instead.", file=sys.stderr)
+    print("[deprecated] Use 'zot visual --off' + 'zot cd ^' instead.", file=sys.stderr)
     _state.reset_state()
     _emit_env(ZOTCLI_VISUAL="", ZOTCLI_PATH="",
-              ZOTCLI_SYNC_AGE="", ZOTCLI_PROMPT_COLOR="")
+              ZOTCLI_PROMPT_COLOR="")
 
 
 def cmd_config(args):
@@ -756,7 +777,7 @@ Searching:   find <pattern> [--field <f>] [--scope library] [--tag <t>] [--type 
 Exporting:   get <item> [--bibtex|--json|--bib] [--style <csl>]
              get <item>:<child> [-o <path>]
 Setup:       connect  sync  config [key [value]]
-Prompt:      prompt --on [--color <name>]  prompt --off  prompt (toggle)
+Visual:      visual --on [--color <name>]  visual --off  visual (toggle)
 Python:      py  py -c '<code>'  py <script.py>
 
 Field aliases for --fields: label, title, citation_key (ck), author (creator), year, type, meta, key
@@ -919,7 +940,7 @@ COMMANDS = {
     "sync":         cmd_sync,
     "off":          cmd_off,
     "config":       cmd_config,
-    "prompt":       cmd_prompt,
+    "visual":       cmd_visual,
     "help":         cmd_help,
     "--help":       cmd_help,
     "-h":           cmd_help,

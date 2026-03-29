@@ -65,10 +65,7 @@ __zotcli_ps1() {
 
     local fmt="${1:-%s}"
     local path="${ZOTCLI_PATH:-zot://}"
-    local sync="${ZOTCLI_SYNC_AGE:-}"
-    local info="$path"
-    [[ -n "$sync" ]] && info+=" [${sync}]"
-    printf -- "$fmt" "$info"
+    printf -- "$fmt" "$path"
 }
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@
 ls:
   default_sort: name       # name | date | type | creator
   sort_reverse: false
+  default_fields: label,type,meta  # label | title | citation_key (ck) | author | year | type | meta | key
 
 # Export
 get:
@@ -17,10 +18,6 @@ cache:
 
 # Visual mode
 visual:
-  enabled: true            # set to false to disable PS1 hook entirely
-  show_sync_age: true
-
-# Prompt
-prompt:
-  auto: true       # auto-show prompt on navigation commands (cd)
-  color: cyan      # cyan | green | yellow | red | blue | magenta | white | bright_*
+  auto: true               # auto-activate on navigation commands (cd)
+  color: cyan              # cyan | green | yellow | red | blue | magenta | white | bright_*
+  show_sync_age: true      # show sync age footer in listings
