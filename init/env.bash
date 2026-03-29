@@ -11,6 +11,9 @@ if [[ -d "$BASE_DIR/bin" ]]; then
 fi
 
 shopt -s nullglob
+for init in "$BASE_DIR"/spells/*/inits/bash/*.bash; do
+  [[ -f "$init" ]] && source "$init"
+done
 for completion in "$BASE_DIR"/spells/*/completions/bash/*.bash; do
   [[ -f "$completion" ]] && source "$completion"
 done

@@ -173,6 +173,7 @@ def cmd_cd(args):
     display = _state.full_path(new_st)
     print(display)
     _emit_state_env(new_st)
+    _maybe_auto_activate()
 
 
 def cmd_pwd(args):
@@ -622,13 +623,86 @@ def cmd_sync(args):
     _emit_sync_age()
 
 
+def _prompt_color_code():
+    """Return the ANSI escape for the configured prompt color."""
+    cfg = _config.load_config()
+    color_name = _config.get_value(cfg, "prompt.color") or "cyan"
+    return _ANSI_COLORS.get(color_name.lower(), "\\e[36m")
+
+
+def _maybe_auto_activate():
+    """Emit prompt activation if prompt.auto is enabled and not already active."""
+    if os.environ.get("ZOTCLI_VISUAL") == "1":
+        return
+    cfg = _config.load_config()
+    auto = _config.get_value(cfg, "prompt.auto")
+    if auto is False:
+        return
+    _emit_env(ZOTCLI_VISUAL="1", ZOTCLI_PROMPT_COLOR=_prompt_color_code())
+
+
+def cmd_prompt(args):
+    """Activate/deactivate the prompt display.
+
+    Usage:
+      zotcli prompt --on [--color <name>]   Activate prompt
+      zotcli prompt --off                   Deactivate prompt
+      zotcli prompt                         Toggle
+    """
+    color_name = None
+    activate = None
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--on":
+            activate = True
+            i += 1
+        elif args[i] == "--off":
+            activate = False
+            i += 1
+        elif args[i] == "--color" and i + 1 < len(args):
+            color_name = args[i + 1]
+            i += 2
+        elif args[i].startswith("--color="):
+            color_name = args[i][8:]
+            i += 1
+        else:
+            i += 1
+
+    # Toggle if no explicit flag
+    if activate is None:
+        activate = os.environ.get("ZOTCLI_VISUAL") != "1"
+
+    if activate:
+        color_code = _prompt_color_code()
+        if color_name:
+            code = _ANSI_COLORS.get(color_name.lower())
+            if code is None:
+                _fmt.error(f"Unknown color {color_name!r}. Valid: {', '.join(sorted(_ANSI_COLORS))}")
+                sys.exit(1)
+            color_code = code
+
+        _emit_env(ZOTCLI_VISUAL="1", ZOTCLI_PROMPT_COLOR=color_code)
+
+        # Also emit current path/sync so the prompt shows immediately
+        st = _state.read_state()
+        _emit_state_env(st)
+        _emit_sync_age()
+    else:
+        _emit_env(ZOTCLI_VISUAL="", ZOTCLI_PATH="",
+                  ZOTCLI_SYNC_AGE="", ZOTCLI_PROMPT_COLOR="")
+
+
 def cmd_off(args):
-    """Deactivate visual mode and reset navigation state to root."""
+    """Deactivate visual mode and reset navigation state to root.
+
+    DEPRECATED: Use 'zotcli prompt --off' to hide the prompt,
+    or 'zotcli cd ^' to go to root.
+    """
+    print("[deprecated] Use 'zot prompt --off' + 'zot cd ^' instead.", file=sys.stderr)
     _state.reset_state()
-    # The shell wrapper handles unsetting ZOTCLI_VISUAL, ZOTCLI_PATH, ZOTCLI_SYNC_AGE
-    # and removing __zotcli_hook from PROMPT_COMMAND.
-    # We just emit the env vars to clear them.
-    _emit_env(ZOTCLI_PATH="^")
+    _emit_env(ZOTCLI_VISUAL="", ZOTCLI_PATH="",
+              ZOTCLI_SYNC_AGE="", ZOTCLI_PROMPT_COLOR="")
 
 
 def cmd_config(args):
@@ -654,90 +728,22 @@ def cmd_config(args):
 
 
 _ANSI_COLORS = {
-    "black":          "\\[\\e[30m\\]",
-    "red":            "\\[\\e[31m\\]",
-    "green":          "\\[\\e[32m\\]",
-    "yellow":         "\\[\\e[33m\\]",
-    "blue":           "\\[\\e[34m\\]",
-    "magenta":        "\\[\\e[35m\\]",
-    "cyan":           "\\[\\e[36m\\]",
-    "white":          "\\[\\e[37m\\]",
-    "bright_red":     "\\[\\e[91m\\]",
-    "bright_green":   "\\[\\e[92m\\]",
-    "bright_yellow":  "\\[\\e[93m\\]",
-    "bright_blue":    "\\[\\e[94m\\]",
-    "bright_magenta": "\\[\\e[95m\\]",
-    "bright_cyan":    "\\[\\e[96m\\]",
-    "bright_white":   "\\[\\e[97m\\]",
+    "black":          "\\e[30m",
+    "red":            "\\e[31m",
+    "green":          "\\e[32m",
+    "yellow":         "\\e[33m",
+    "blue":           "\\e[34m",
+    "magenta":        "\\e[35m",
+    "cyan":           "\\e[36m",
+    "white":          "\\e[37m",
+    "bright_red":     "\\e[91m",
+    "bright_green":   "\\e[92m",
+    "bright_yellow":  "\\e[93m",
+    "bright_blue":    "\\e[94m",
+    "bright_magenta": "\\e[95m",
+    "bright_cyan":    "\\e[96m",
+    "bright_white":   "\\e[97m",
 }
-_ANSI_RESET = "\\[\\e[0m\\]"
-
-
-def cmd_shell_init(args):
-    """Print a bash snippet for eval.
-
-    Usage: eval "$(command zotcli shell-init [--mode session|static|off] [--color <name>])"
-
-    Modes:
-      session  Install __zotcli_prompt_apply into PROMPT_COMMAND (default).
-               Session-only — does NOT touch dotfiles.
-      static   Print inline snippet to paste inside _update_prompt.
-      off      Print a no-op comment (disables via config without removing the eval line).
-    """
-    cfg   = _config.load_config()
-    mode  = _config.get_value(cfg, "prompt.mode")  or "session"
-    color = _config.get_value(cfg, "prompt.color") or "cyan"
-
-    i = 0
-    while i < len(args):
-        if args[i] == "--mode" and i + 1 < len(args):
-            mode = args[i + 1]; i += 2
-        elif args[i].startswith("--mode="):
-            mode = args[i][7:]; i += 1
-        elif args[i] == "--color" and i + 1 < len(args):
-            color = args[i + 1]; i += 2
-        elif args[i].startswith("--color="):
-            color = args[i][8:]; i += 1
-        else:
-            i += 1
-
-    if mode not in ("session", "static", "off"):
-        _fmt.error("--mode must be one of: session, static, off")
-        sys.exit(1)
-
-    if mode == "off":
-        print("# zotcli shell-init: mode=off, no prompt hook installed")
-        return
-
-    ansi = _ANSI_COLORS.get(color.lower())
-    if ansi is None:
-        _fmt.error(f"Unknown color {color!r}. Valid: {', '.join(sorted(_ANSI_COLORS))}")
-        sys.exit(1)
-
-    reset = _ANSI_RESET
-    if mode == "static":
-        print(f"""\
-# zotcli prompt snippet — paste INSIDE your _update_prompt / prompt function
-# Requires __zotcli_ps1 from completions/bash/zotcli.bash
-local _zot_info
-_zot_info="$(__zotcli_ps1)"
-if [[ -n "$_zot_info" ]]; then
-    PS1+="{ansi}${{_zot_info}}{reset} "
-fi""")
-    else:  # session
-        print(f"""\
-# zotcli session prompt hook — eval this to activate for the current shell
-# Does NOT modify ~/.bashrc or any dotfile
-__zotcli_prompt_apply() {{
-  local _zot_info
-  _zot_info="$(__zotcli_ps1)"
-  [[ -z "$_zot_info" ]] && return
-  PS1="${{PS1%{ansi}*{reset}}}{ansi}${{_zot_info}}{reset} "
-}}
-case ";${{PROMPT_COMMAND}};" in
-  *";__zotcli_prompt_apply;"*) ;;
-  *) PROMPT_COMMAND="${{PROMPT_COMMAND:+${{PROMPT_COMMAND}}; }}__zotcli_prompt_apply" ;;
-esac""")
 
 
 def cmd_help(args):
@@ -749,8 +755,8 @@ Reading:     cat <item>[:<child>]
 Searching:   find <pattern> [--field <f>] [--scope library] [--tag <t>] [--type <t>] [--fields <csv>]
 Exporting:   get <item> [--bibtex|--json|--bib] [--style <csl>]
              get <item>:<child> [-o <path>]
-Setup:       connect  sync  off  config [key [value]]
-             shell-init [--mode session|static|off] [--color <name>]
+Setup:       connect  sync  config [key [value]]
+Prompt:      prompt --on [--color <name>]  prompt --off  prompt (toggle)
 Python:      py  py -c '<code>'  py <script.py>
 
 Field aliases for --fields: label, title, citation_key (ck), author (creator), year, type, meta, key
@@ -913,7 +919,7 @@ COMMANDS = {
     "sync":         cmd_sync,
     "off":          cmd_off,
     "config":       cmd_config,
-    "shell-init":   cmd_shell_init,
+    "prompt":       cmd_prompt,
     "help":         cmd_help,
     "--help":       cmd_help,
     "-h":           cmd_help,

@@ -50,8 +50,9 @@ executable:
 .PHONY: new
 new:
 	@if [ -z "$(SPELL)" ]; then echo "ERROR: use make new SPELL=<name>"; exit 1; fi
-	@mkdir -p "$(SPELLS_DIR)/$(SPELL)"/{bin,lib,tests,docs,config,data,logs,completions/bash,completions/zsh,completions/fish,services/systemd/user,services/systemd/system,desktop}
+	@mkdir -p "$(SPELLS_DIR)/$(SPELL)"/{bin,lib,tests,docs,config,data,logs,inits/bash,inits/zsh,inits/fish,completions/bash,completions/zsh,completions/fish,services/systemd/user,services/systemd/system,desktop}
 	@touch "$(SPELLS_DIR)/$(SPELL)/data/.gitkeep" "$(SPELLS_DIR)/$(SPELL)/logs/.gitkeep" \
+		"$(SPELLS_DIR)/$(SPELL)/inits/zsh/.gitkeep" "$(SPELLS_DIR)/$(SPELL)/inits/fish/.gitkeep" \
 		"$(SPELLS_DIR)/$(SPELL)/completions/zsh/.gitkeep" "$(SPELLS_DIR)/$(SPELL)/completions/fish/.gitkeep" \
 		"$(SPELLS_DIR)/$(SPELL)/desktop/.gitkeep"
 	@[ -f "$(SPELLS_DIR)/$(SPELL)/README.md" ] || printf '# %s\n\nSpell scaffold for actions, binaries, configs, docs, tests, services, and completions.\n' "$(SPELL)" > "$(SPELLS_DIR)/$(SPELL)/README.md"

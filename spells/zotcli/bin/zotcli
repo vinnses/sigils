@@ -45,8 +45,8 @@ case "$SUBCOMMAND" in
         echo "Searching:   find <pattern> [--field <f>] [--scope library] [--tag <t>] [--type <t>]" >&2
         echo "Exporting:   get <item> [--bibtex|--json|--bib] [--style <csl>]" >&2
         echo "             get <item>:<child> [-o <path>]" >&2
-        echo "Setup:       connect  sync  off  config [key [value]]" >&2
-        echo "             shell-init [--mode session|static|off] [--color <name>]" >&2
+        echo "Setup:       connect  sync  config [key [value]]" >&2
+        echo "Prompt:      prompt --on [--color <name>]  prompt --off  prompt (toggle)" >&2
         echo "Python:      py  py -c '<code>'  py <script.py>" >&2
         echo "" >&2
         echo "Global flags: --fresh" >&2
