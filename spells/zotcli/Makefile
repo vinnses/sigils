@@ -1,21 +1,28 @@
 SHELL := /bin/bash
-
 SPELL_DIR := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
-.PHONY: install test check fmt clean
+.PHONY: install install-dev test clean purge prompt prompt-session
 
 install:
-	pip install pyzotero --break-system-packages
+	cd "$(SPELL_DIR)" && uv sync
+
+install-dev:
+	cd "$(SPELL_DIR)" && uv sync --dev
 
 test:
-	@SPELL_DIR="$(SPELL_DIR)" python3 "$(SPELL_DIR)/tests/zotcli/smoke.py"
-
-check:
-	@echo "[skip] no spell-local checks configured"
-
-fmt:
-	@echo "[skip] no spell-local formatting configured"
+	cd "$(SPELL_DIR)" && SPELL_DIR="$(SPELL_DIR)" uv run python tests/zotcli/smoke.py
 
 clean:
-	@rm -f "$(SPELL_DIR)/data/cache.json" "$(SPELL_DIR)/data/state.json"
+	rm -f "$(SPELL_DIR)/data/cache.json" "$(SPELL_DIR)/data/state.json"
 	@echo "Removed cache.json and state.json"
+
+purge: clean
+	rm -rf "$(SPELL_DIR)/.venv"
+	rm -rf "$(SPELL_DIR)/uv.lock" 
+	@echo "Removed .venv"
+
+prompt:
+	@command zotcli shell-init --mode static
+
+prompt-session:
+	@command zotcli shell-init --mode session

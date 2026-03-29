@@ -1,12 +1,17 @@
 """
 formatters.py — ANSI-aware output formatters for zotcli.
-TTY detection via sys.stdout.isatty(); no color when piped.
+
+Color detection: sys.stdout.isatty() OR ZOTCLI_COLOR=1 env var.
+The shell wrapper sets ZOTCLI_COLOR=1 so colors survive stdout capture.
 """
+import os
 import sys
 import textwrap
 
-# Color constants — empty strings when not a TTY
-if sys.stdout.isatty():
+# Color detection: TTY or forced via env var (set by shell wrapper)
+_color_enabled = sys.stdout.isatty() or os.environ.get("ZOTCLI_COLOR") == "1"
+
+if _color_enabled:
     BOLD   = "\033[1m"
     DIM    = "\033[2m"
     CYAN   = "\033[0;36m"
@@ -21,6 +26,83 @@ else:
 def _c(code, text):
     """Wrap text in ANSI code + reset."""
     return f"{code}{text}{NC}" if code else text
+
+
+LS_FIELD_ALIASES = {
+    "label": "label",
+    "name": "title",
+    "title": "title",
+    "citation_key": "citation_key",
+    "ck": "citation_key",
+    "author": "author",
+    "creator": "author",
+    "year": "year",
+    "type": "type",
+    "meta": "meta",
+    "key": "key",
+}
+
+DEFAULT_LS_FIELDS = ["label", "type", "meta"]
+DEFAULT_FIND_FIELDS = ["label", "type", "meta"]
+
+
+def normalize_fields(spec, *, context="ls"):
+    """Parse comma-separated field spec into canonical field list."""
+    default = DEFAULT_FIND_FIELDS if context == "find" else DEFAULT_LS_FIELDS
+    if not spec:
+        return default
+
+    fields = []
+    for raw in spec.split(","):
+        key = raw.strip().lower()
+        if not key:
+            continue
+        mapped = LS_FIELD_ALIASES.get(key)
+        if mapped is None:
+            raise ValueError(f"Unknown field '{raw}'. Allowed: {', '.join(sorted(LS_FIELD_ALIASES))}")
+        fields.append(mapped)
+
+    if not fields:
+        return default
+
+    # de-dup preserving order
+    seen = set()
+    out = []
+    for f in fields:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def _item_field_values(item_data, *, fields, collections_map=None):
+    label = _item_label(item_data)
+    itype = item_data.get("itemType", "")
+    creators = _fmt_creators(item_data.get("creators", []))
+    year = (item_data.get("date", "") or "")[:4]
+    meta = f"{creators} ({year})" if creators else year
+    ck = get_citation_key(item_data) or ""
+    title = item_data.get("title", "")
+    item_key = item_data.get("key", "")
+
+    values = {
+        "label": _c(CYAN, label),
+        "type": _c(DIM, itype),
+        "author": creators,
+        "year": year,
+        "meta": meta,
+        "citation_key": ck,
+        "title": title,
+        "key": item_key,
+    }
+
+    if collections_map is not None:
+        item_cols = item_data.get("collections", [])
+        col_path = collections_map.get(item_cols[0], "") if item_cols else ""
+        if col_path:
+            values["meta"] = f"{values['meta']}  {_c(DIM, col_path)}" if values["meta"] else _c(DIM, col_path)
+
+    return [values.get(field, "") for field in fields]
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +147,26 @@ def _fmt_creators(creators, max_n=3):
     return result
 
 
+def _sort_key_for_item(item, sort_by):
+    """Return a sort key for an item based on sort_by field name."""
+    data = item.get("data", item)
+    if sort_by == "date":
+        return data.get("date", "") or ""
+    if sort_by == "type":
+        return data.get("itemType", "") or ""
+    if sort_by == "creator":
+        creators = data.get("creators", [])
+        if creators:
+            return (creators[0].get("lastName") or creators[0].get("name") or "").lower()
+        return ""
+    return _item_label(data).lower()
+
+
+def _is_leaf_item(item_data):
+    """Return True if itemType is attachment or note (not a bibliographic item)."""
+    return item_data.get("itemType") in ("attachment", "note")
+
+
 # ---------------------------------------------------------------------------
 # Output functions
 # ---------------------------------------------------------------------------
@@ -73,25 +175,53 @@ def print_pwd(path):
     print(path)
 
 
-def print_ls(collections, items):
-    """Mixed listing: collections (bold + /) then items."""
-    for col in collections:
+def print_ls(collections, items, sort_key="name", reverse=False,
+             current_collection_key=None, fields=None):
+    """
+    Mixed listing: collections (bold + /) then items.
+
+    Attachments and notes are excluded — they only appear when inside an item.
+    Items in multiple collections with current NOT first get a → prefix.
+    """
+    for col in sorted(collections,
+                      key=lambda c: c.get("data", c).get("name", "").lower()):
         data = col.get("data", col)
         print(_c(BOLD, data.get("name", "") + "/"))
 
-    for item in items:
-        data     = item.get("data", item)
-        label    = _item_label(data)
-        itype    = _c(DIM, data.get("itemType", ""))
-        creators = _fmt_creators(data.get("creators", []))
-        year     = (data.get("date", "") or "")[:4]
-        meta     = f"{creators} ({year})" if creators else year
-        print(f"{_c(CYAN, label)}\t{itype}\t{meta}")
+    # Exclude attachments and notes from collection-level view
+    bib_items = [it for it in items if not _is_leaf_item(it.get("data", it))]
+
+    if sort_key == "date":
+        sorted_items = sorted(bib_items,
+                              key=lambda it: _sort_key_for_item(it, sort_key),
+                              reverse=not reverse)  # newest first by default
+    else:
+        sorted_items = sorted(bib_items,
+                              key=lambda it: _sort_key_for_item(it, sort_key),
+                              reverse=reverse)
+
+    selected_fields = fields or DEFAULT_LS_FIELDS
+
+    for item in sorted_items:
+        data = item.get("data", item)
+
+        # Multi-collection indicator
+        item_cols = data.get("collections", [])
+        prefix = ""
+        if len(item_cols) > 1 and current_collection_key is not None:
+            if item_cols[0] != current_collection_key:
+                prefix = "→ "
+
+        values = _item_field_values(data, fields=selected_fields)
+        print(f"{prefix}" + "\t".join(values))
 
 
 def print_children(children):
     """List item children (attachments/notes): filename TAB type."""
-    for child in children:
+    for child in sorted(children,
+                        key=lambda c: (c.get("data", c).get("filename")
+                                       or c.get("data", c).get("title")
+                                       or "").lower()):
         data     = child.get("data", child)
         filename = data.get("filename") or data.get("title") or data.get("key", "")
         itype    = data.get("itemType", "")
@@ -115,7 +245,6 @@ def print_item_info(item):
             label = _c(BOLD, f"{key}:")
             print(f"{label:<28} {val}")
 
-    # Priority fields
     row("Title",    data.get("title", ""))
     row("Authors",  _fmt_creators(data.get("creators", []), max_n=10))
     row("Type",     data.get("itemType", ""))
@@ -148,22 +277,75 @@ def print_item_info(item):
                             initial_indent="  ", subsequent_indent="  "))
 
 
-def print_tree(collections, parent_key=None, prefix=""):
-    """Recursive tree display rooted at parent_key."""
-    children = [
-        col for col in collections
-        if (col.get("data", col).get("parentCollection") or None) == parent_key
-    ]
-    for i, col in enumerate(children):
-        data    = col.get("data", col)
-        name    = data.get("name", "")
-        is_last = i == len(children) - 1
+def print_find_results(items, collections_map=None, fields=None):
+    """Like print_ls items section but includes collection path per item."""
+    selected_fields = fields or DEFAULT_FIND_FIELDS
+    for item in items:
+        data = item.get("data", item)
+        values = _item_field_values(data, fields=selected_fields, collections_map=collections_map)
+        print("\t".join(values))
+
+
+def print_tree(collections, parent_key=None, prefix="", depth=None, _current=0,
+               zot=None):
+    """
+    Recursive tree display rooted at parent_key.
+
+    When zot is provided, items are fetched and shown per collection
+    (bibliographic items only — not their children/attachments).
+    """
+    if depth is not None and _current >= depth:
+        return
+
+    children_cols = sorted(
+        [col for col in collections
+         if (col.get("data", col).get("parentCollection") or None) == parent_key],
+        key=lambda c: c.get("data", c).get("name", "").lower()
+    )
+
+    # Fetch items for this level if zot provided and we're inside a collection
+    level_items = []
+    if zot is not None and parent_key is not None:
+        try:
+            raw = zot.everything(zot.collection_items(parent_key))
+            level_items = [it for it in raw
+                           if not _is_leaf_item(it.get("data", it))]
+            level_items = sorted(level_items,
+                                 key=lambda it: _item_label(it.get("data", it)).lower())
+        except Exception:
+            pass
+
+    all_entries = ([("col", c) for c in children_cols]
+                   + [("item", it) for it in level_items])
+
+    for idx, (etype, entry) in enumerate(all_entries):
+        is_last   = idx == len(all_entries) - 1
         connector = "└── " if is_last else "├── "
-        print(f"{prefix}{connector}{_c(BOLD, name + '/')}")
-        ext = "    " if is_last else "│   "
-        print_tree(collections, parent_key=data.get("key"), prefix=prefix + ext)
+        ext       = "    " if is_last else "│   "
+
+        if etype == "col":
+            data = entry.get("data", entry)
+            name = data.get("name", "")
+            print(f"{prefix}{connector}{_c(BOLD, name + '/')}")
+            print_tree(collections,
+                       parent_key=data.get("key"),
+                       prefix=prefix + ext,
+                       depth=depth,
+                       _current=_current + 1,
+                       zot=zot)
+        else:
+            data     = entry.get("data", entry)
+            label    = _item_label(data)
+            itype    = _c(DIM, data.get("itemType", ""))
+            creators = _fmt_creators(data.get("creators", []))
+            year     = (data.get("date", "") or "")[:4]
+            meta     = f"{creators} ({year})" if creators else year
+            print(f"{prefix}{connector}{_c(CYAN, label)}  {itype}  {meta}")
 
 
 def error(msg):
     """Print an error to stderr."""
-    print(f"{RED}error:{NC} {msg}" if RED else f"error: {msg}", file=sys.stderr)
+    if sys.stderr.isatty():
+        print(f"\033[0;31merror:\033[0m {msg}", file=sys.stderr)
+    else:
+        print(f"error: {msg}", file=sys.stderr)

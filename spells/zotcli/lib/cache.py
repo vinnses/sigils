@@ -59,12 +59,35 @@ def invalidate():
         pass
 
 
-def get_collections(fresh=False):
+def sync_age_human():
+    """
+    Return a human-readable string for how long ago the cache was last synced.
+    E.g. 'just now', '5m ago', '2h ago', 'unknown'.
+    """
+    cache = load_cache()
+    if cache is None or "updated_at" not in cache:
+        return "unknown"
+    try:
+        updated = datetime.fromisoformat(cache["updated_at"])
+        age = (datetime.now(timezone.utc) - updated).total_seconds()
+    except (ValueError, TypeError):
+        return "unknown"
+
+    if age < 60:
+        return "just now"
+    if age < 3600:
+        return f"{int(age // 60)}m ago"
+    if age < 86400:
+        return f"{int(age // 3600)}h ago"
+    return f"{int(age // 86400)}d ago"
+
+
+def get_collections(fresh=False, ttl_seconds=3600):
     """
     Return the full collection list, from cache when fresh or from API otherwise.
     Automatically saves the API result to cache.
     """
-    if not fresh and not is_stale():
+    if not fresh and not is_stale(ttl_seconds):
         cached = load_cache()
         if cached and "collections" in cached:
             return cached["collections"]

@@ -1,0 +1,11 @@
+[project]
+name = "zotcli-spell"
+version = "0.3.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzotero",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]

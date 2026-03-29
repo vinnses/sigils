@@ -8,5 +8,7 @@ spells/*/data/*
 !spells/*/data/.gitkeep
 
 spells/zotcli/config/credentials.env
+spells/zotcli/config/zotcli.yaml
 spells/zotcli/data/state.json
 spells/zotcli/data/cache.json
+spells/zotcli/.venv/
