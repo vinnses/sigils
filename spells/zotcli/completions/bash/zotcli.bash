@@ -94,7 +94,7 @@ _zotcli() {
 
     COMP_WORDBREAKS="$OLD_IFS"
 
-    local subcommands="cd pwd ls tree cat get find sync connect config py off help"
+    local subcommands="cd pwd ls tree cat get find sync connect config py off shell-init help"
 
     # Find the subcommand (skip global flags)
     local subcmd=""
@@ -179,8 +179,22 @@ _zotcli() {
 
         config)
             COMPREPLY=($(compgen -W \
-                "ls.default_sort ls.sort_reverse get.default_format get.bib_style cache.ttl_seconds visual.enabled visual.show_sync_age" \
+                "ls.default_sort ls.sort_reverse get.default_format get.bib_style cache.ttl_seconds visual.enabled visual.show_sync_age prompt.mode prompt.color" \
                 -- "$cur"))
+            ;;
+
+        shell-init)
+            case "$prev" in
+                --mode)
+                    COMPREPLY=($(compgen -W "session static off" -- "$cur"))
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "cyan green yellow red blue magenta white black bright_cyan bright_green bright_yellow bright_red bright_blue bright_magenta bright_white" -- "$cur"))
+                    ;;
+                *)
+                    COMPREPLY=($(compgen -W "--mode --color" -- "$cur"))
+                    ;;
+            esac
             ;;
 
         py)

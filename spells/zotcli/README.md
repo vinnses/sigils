@@ -97,6 +97,7 @@ zotcli --help                 # top-level help
 | `zotcli off` | Deactivate visual mode + reset navigation to root. |
 | `zotcli config` | Print effective configuration. |
 | `zotcli config <key> <value>` | Set a configuration value (dot-notation). |
+| `zotcli shell-init` | Print bash snippet for `eval` — installs PS1 prompt hook. |
 
 ### Python REPL
 
@@ -116,7 +117,27 @@ Auto-imports are configured in `config/imports.py`.
 
 ## Visual Mode (PS1 Integration)
 
-`__zotcli_ps1` works like `git_status` — it outputs the current Zotero path when active, nothing when zotcli hasn't been used. Add it to your `_update_prompt`:
+`__zotcli_ps1` works like `git_status` — outputs the current Zotero path when active, nothing otherwise.
+
+### Quickest setup (session-only, no dotfile changes)
+
+```sh
+eval "$(command zotcli shell-init)"
+```
+
+Installs `__zotcli_prompt_apply` into `PROMPT_COMMAND`. Lasts for the current session only.
+
+> **Why `command zotcli`?** The `zotcli()` shell wrapper parses `__ZOTCLI_ENV__` lines from output. Using `command` bypasses it so the raw bash snippet reaches `eval` unmodified.
+
+### Permanent setup (inside `_update_prompt`)
+
+Get the snippet to paste into your prompt function:
+
+```sh
+zotcli shell-init --mode static
+```
+
+Example result:
 
 ```bash
 _update_prompt() {
@@ -124,29 +145,35 @@ _update_prompt() {
     # ... existing prompt logic ...
 
     # Zotero context — only shows after first zotcli command in session
-    local zot_info="$(__zotcli_ps1)"
-    if [[ -n "$zot_info" ]]; then
-        local C_ZOT='\[\e[36m\]'
-        PS1+="${C_ZOT}${zot_info}${C_RESET} "
+    local _zot_info
+    _zot_info="$(__zotcli_ps1)"
+    if [[ -n "$_zot_info" ]]; then
+        PS1+="\[\e[36m\]${_zot_info}\[\e[0m\] "
     fi
 
     # ... rest of prompt ...
 }
 ```
 
-If you prefer a copy/paste snippet from build tooling:
+### Options
 
 ```sh
-make -C spells/zotcli prompt
+zotcli shell-init                        # default: mode=session, color=cyan
+zotcli shell-init --mode session         # PROMPT_COMMAND hook (session-only)
+zotcli shell-init --mode static          # inline snippet for _update_prompt
+zotcli shell-init --mode off             # no-op (useful to disable via config)
+zotcli shell-init --color green          # change highlight color
 ```
 
-Session-only (without touching `~/.bashrc` / dotfiles), for the current shell:
+Colors: `cyan` (default), `green`, `yellow`, `red`, `blue`, `magenta`, `white`, `black`, and `bright_*` variants.
 
-```sh
-eval "$(make -C spells/zotcli prompt-session)"
+Configure persistent defaults in `config/zotcli.yaml`:
+
+```yaml
+prompt:
+  mode: session
+  color: cyan
 ```
-
-> The snippet is intended to be inserted **inside** your prompt update function (e.g. `_update_prompt`), so it runs on every prompt redraw.
 
 Output example when active: `zot://1.Books [5m ago]`
 
@@ -172,6 +199,8 @@ Config keys:
 | `get.bib_style` | `apa` | CSL style for `--bib` |
 | `cache.ttl_seconds` | `3600` | Cache TTL (1 hour) |
 | `visual.enabled` | `true` | Enable/disable PS1 hook |
+| `prompt.mode` | `session` | `shell-init` mode: `session`, `static`, `off` |
+| `prompt.color` | `cyan` | PS1 color: `cyan`, `green`, `yellow`, `red`, `blue`, `magenta`, `white`, `bright_*` |
 
 Env vars override config: `ZOTCLI_LS__DEFAULT_SORT=date` (prefix + double underscore).
 

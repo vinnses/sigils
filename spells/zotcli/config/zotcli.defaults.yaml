@@ -19,3 +19,8 @@ cache:
 visual:
   enabled: true            # set to false to disable PS1 hook entirely
   show_sync_age: true
+
+# Prompt / shell-init subcommand
+prompt:
+  mode: session    # session | static | off
+  color: cyan      # cyan | green | yellow | red | blue | magenta | white | bright_*
