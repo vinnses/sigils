@@ -30,6 +30,9 @@ export SPELL_DIR
 export ZOTCLI_FRESH="$FRESH"
 
 case "$SUBCOMMAND" in
+    -h|--help|help)
+        exec "$PYTHON" "$SPELL_DIR/lib/commands.py" help "${SUBARGS[@]}"
+        ;;
     py)
         exec "$PYTHON" "$SPELL_DIR/lib/shell_py.py" "${SUBARGS[@]}"
         ;;

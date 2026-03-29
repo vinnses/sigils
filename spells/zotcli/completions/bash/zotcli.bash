@@ -94,7 +94,7 @@ _zotcli() {
 
     COMP_WORDBREAKS="$OLD_IFS"
 
-    local subcommands="cd pwd ls tree cat get find sync connect config py off"
+    local subcommands="cd pwd ls tree cat get find sync connect config py off help"
 
     # Find the subcommand (skip global flags)
     local subcmd=""
@@ -116,7 +116,7 @@ _zotcli() {
         cd|ls)
             if [[ "$cur" == -* ]]; then
                 [[ "$subcmd" == "ls" ]] && \
-                    COMPREPLY=($(compgen -W "--sort --reverse --unfiled" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--sort --reverse --unfiled --fields" -- "$cur"))
             else
                 compopt -o nospace 2>/dev/null
                 local IFS=$'\n'
@@ -126,6 +126,12 @@ _zotcli() {
                 while IFS=$'\t' read -r completion _type; do
                     [[ -n "$completion" ]] && COMPREPLY+=("$completion")
                 done <<< "$results"
+                # Add item refs (citation key/item key) in current collection context.
+                local item_results
+                item_results=$(SPELL_DIR="${SPELL_DIR:-}" command zotcli _complete_items item "$cur" 2>/dev/null)
+                while IFS=$'\t' read -r completion _type; do
+                    [[ -n "$completion" ]] && COMPREPLY+=("$completion")
+                done <<< "$item_results"
                 if [[ "$subcmd" == "cd" ]]; then
                     COMPREPLY+=($(compgen -W "zot:// .. -" -- "$cur"))
                 fi
@@ -133,13 +139,34 @@ _zotcli() {
             ;;
 
         get)
-            [[ "$cur" == -* ]] && \
+            if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--bibtex --json --bib --style -o" -- "$cur"))
+            else
+                local IFS=$'\n'
+                local refs
+                refs=$(SPELL_DIR="${SPELL_DIR:-}" command zotcli _complete_items ref "$cur" 2>/dev/null)
+                COMPREPLY=()
+                while IFS=$'\t' read -r completion _type; do
+                    [[ -n "$completion" ]] && COMPREPLY+=("$completion")
+                done <<< "$refs"
+            fi
+            ;;
+
+        cat)
+            if [[ "$cur" != -* ]]; then
+                local IFS=$'\n'
+                local refs
+                refs=$(SPELL_DIR="${SPELL_DIR:-}" command zotcli _complete_items ref "$cur" 2>/dev/null)
+                COMPREPLY=()
+                while IFS=$'\t' read -r completion _type; do
+                    [[ -n "$completion" ]] && COMPREPLY+=("$completion")
+                done <<< "$refs"
+            fi
             ;;
 
         find)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--field --scope --tag --type" -- "$cur"))
+                COMPREPLY=($(compgen -W "--field --scope --tag --type --fields" -- "$cur"))
             elif [[ "$prev" == "--scope" ]]; then
                 COMPREPLY=($(compgen -W "collection library" -- "$cur"))
             fi

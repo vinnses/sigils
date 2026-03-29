@@ -28,6 +28,83 @@ def _c(code, text):
     return f"{code}{text}{NC}" if code else text
 
 
+LS_FIELD_ALIASES = {
+    "label": "label",
+    "name": "title",
+    "title": "title",
+    "citation_key": "citation_key",
+    "ck": "citation_key",
+    "author": "author",
+    "creator": "author",
+    "year": "year",
+    "type": "type",
+    "meta": "meta",
+    "key": "key",
+}
+
+DEFAULT_LS_FIELDS = ["label", "type", "meta"]
+DEFAULT_FIND_FIELDS = ["label", "type", "meta"]
+
+
+def normalize_fields(spec, *, context="ls"):
+    """Parse comma-separated field spec into canonical field list."""
+    default = DEFAULT_FIND_FIELDS if context == "find" else DEFAULT_LS_FIELDS
+    if not spec:
+        return default
+
+    fields = []
+    for raw in spec.split(","):
+        key = raw.strip().lower()
+        if not key:
+            continue
+        mapped = LS_FIELD_ALIASES.get(key)
+        if mapped is None:
+            raise ValueError(f"Unknown field '{raw}'. Allowed: {', '.join(sorted(LS_FIELD_ALIASES))}")
+        fields.append(mapped)
+
+    if not fields:
+        return default
+
+    # de-dup preserving order
+    seen = set()
+    out = []
+    for f in fields:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def _item_field_values(item_data, *, fields, collections_map=None):
+    label = _item_label(item_data)
+    itype = item_data.get("itemType", "")
+    creators = _fmt_creators(item_data.get("creators", []))
+    year = (item_data.get("date", "") or "")[:4]
+    meta = f"{creators} ({year})" if creators else year
+    ck = get_citation_key(item_data) or ""
+    title = item_data.get("title", "")
+    item_key = item_data.get("key", "")
+
+    values = {
+        "label": _c(CYAN, label),
+        "type": _c(DIM, itype),
+        "author": creators,
+        "year": year,
+        "meta": meta,
+        "citation_key": ck,
+        "title": title,
+        "key": item_key,
+    }
+
+    if collections_map is not None:
+        item_cols = item_data.get("collections", [])
+        col_path = collections_map.get(item_cols[0], "") if item_cols else ""
+        if col_path:
+            values["meta"] = f"{values['meta']}  {_c(DIM, col_path)}" if values["meta"] else _c(DIM, col_path)
+
+    return [values.get(field, "") for field in fields]
+
+
 # ---------------------------------------------------------------------------
 # Citation key extraction
 # ---------------------------------------------------------------------------
@@ -99,7 +176,7 @@ def print_pwd(path):
 
 
 def print_ls(collections, items, sort_key="name", reverse=False,
-             current_collection_key=None):
+             current_collection_key=None, fields=None):
     """
     Mixed listing: collections (bold + /) then items.
 
@@ -123,13 +200,10 @@ def print_ls(collections, items, sort_key="name", reverse=False,
                               key=lambda it: _sort_key_for_item(it, sort_key),
                               reverse=reverse)
 
+    selected_fields = fields or DEFAULT_LS_FIELDS
+
     for item in sorted_items:
-        data     = item.get("data", item)
-        label    = _item_label(data)
-        itype    = _c(DIM, data.get("itemType", ""))
-        creators = _fmt_creators(data.get("creators", []))
-        year     = (data.get("date", "") or "")[:4]
-        meta     = f"{creators} ({year})" if creators else year
+        data = item.get("data", item)
 
         # Multi-collection indicator
         item_cols = data.get("collections", [])
@@ -138,7 +212,8 @@ def print_ls(collections, items, sort_key="name", reverse=False,
             if item_cols[0] != current_collection_key:
                 prefix = "→ "
 
-        print(f"{prefix}{_c(CYAN, label)}\t{itype}\t{meta}")
+        values = _item_field_values(data, fields=selected_fields)
+        print(f"{prefix}" + "\t".join(values))
 
 
 def print_children(children):
@@ -202,25 +277,13 @@ def print_item_info(item):
                             initial_indent="  ", subsequent_indent="  "))
 
 
-def print_find_results(items, collections_map=None):
+def print_find_results(items, collections_map=None, fields=None):
     """Like print_ls items section but includes collection path per item."""
+    selected_fields = fields or DEFAULT_FIND_FIELDS
     for item in items:
-        data     = item.get("data", item)
-        label    = _item_label(data)
-        itype    = _c(DIM, data.get("itemType", ""))
-        creators = _fmt_creators(data.get("creators", []))
-        year     = (data.get("date", "") or "")[:4]
-        meta     = f"{creators} ({year})" if creators else year
-
-        if collections_map:
-            item_cols = data.get("collections", [])
-            col_path = ""
-            if item_cols:
-                col_path = collections_map.get(item_cols[0], "")
-            if col_path:
-                meta = f"{meta}  {_c(DIM, col_path)}"
-
-        print(f"{_c(CYAN, label)}\t{itype}\t{meta}")
+        data = item.get("data", item)
+        values = _item_field_values(data, fields=selected_fields, collections_map=collections_map)
+        print("\t".join(values))
 
 
 def print_tree(collections, parent_key=None, prefix="", depth=None, _current=0,

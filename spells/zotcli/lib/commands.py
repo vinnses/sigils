@@ -115,6 +115,17 @@ def _parse_ref(ref):
     return ref, None
 
 
+def _completion_item_label(item_data):
+    """Best-effort completion label: citation key, item key, or title."""
+    ck = _fmt.get_citation_key(item_data)
+    if ck:
+        return ck
+    key = item_data.get("key", "")
+    if key:
+        return key
+    return item_data.get("title", "")
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -174,6 +185,7 @@ def cmd_ls(args):
     sort_key = _config.get_value(cfg, "ls.default_sort") or "name"
     reverse  = _config.get_value(cfg, "ls.sort_reverse") or False
     unfiled  = False
+    fields_spec = None
 
     # Parse flags
     positional = []
@@ -191,9 +203,21 @@ def cmd_ls(args):
         elif args[i] == "--unfiled":
             unfiled = True
             i += 1
+        elif args[i] == "--fields" and i + 1 < len(args):
+            fields_spec = args[i + 1]
+            i += 2
+        elif args[i].startswith("--fields="):
+            fields_spec = args[i][9:]
+            i += 1
         else:
             positional.append(args[i])
             i += 1
+
+    try:
+        fields = _fmt.normalize_fields(fields_spec, context="ls")
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
 
     st = _state.read_state()
     collections = _collections()
@@ -217,7 +241,7 @@ def cmd_ls(args):
             if not it.get("data", it).get("collections")
             and it.get("data", it).get("itemType") not in ("attachment", "note")
         ]
-        _fmt.print_ls([], unfiled_items, sort_key=sort_key, reverse=reverse)
+        _fmt.print_ls([], unfiled_items, sort_key=sort_key, reverse=reverse, fields=fields)
         return
 
     if not positional:
@@ -227,7 +251,7 @@ def cmd_ls(args):
         zot        = _zot()
         items      = _fetch_items(zot, target_key)
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
-                      current_collection_key=target_key)
+                      current_collection_key=target_key, fields=fields)
         return
 
     ref = positional[0]
@@ -244,7 +268,7 @@ def cmd_ls(args):
         zot      = _zot()
         items    = _fetch_items(zot, target_key)
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
-                      current_collection_key=target_key)
+                      current_collection_key=target_key, fields=fields)
     except ValueError:
         # Not a collection — treat as item reference, list children
         zot   = _zot()
@@ -446,7 +470,7 @@ def cmd_get(args):
 
 def cmd_find(args):
     if not args:
-        print("Usage: zotcli find <pattern> [--field <f>] [--scope library] [--tag <tag>] [--type <type>]",
+        print("Usage: zotcli find <pattern> [--field <f>] [--scope library] [--tag <tag>] [--type <type>] [--fields <csv>]",
               file=sys.stderr)
         sys.exit(1)
 
@@ -457,6 +481,7 @@ def cmd_find(args):
     scope      = "collection"
     tags       = []
     item_type  = None
+    out_fields = None
 
     i = 0
     while i < len(args):
@@ -484,11 +509,23 @@ def cmd_find(args):
         elif args[i].startswith("--type="):
             item_type = args[i][7:]
             i += 1
+        elif args[i] == "--fields" and i + 1 < len(args):
+            out_fields = args[i + 1]
+            i += 2
+        elif args[i].startswith("--fields="):
+            out_fields = args[i][9:]
+            i += 1
         elif not args[i].startswith("-"):
             pattern = args[i]
             i += 1
         else:
             i += 1
+
+    try:
+        fields = _fmt.normalize_fields(out_fields, context="find")
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
 
     st = _state.read_state()
 
@@ -512,7 +549,7 @@ def cmd_find(args):
             data = col.get("data", col)
             col_map[data.get("key", "")] = _nav.build_path(collections, data.get("key"))
 
-        _fmt.print_find_results(results, collections_map=col_map)
+        _fmt.print_find_results(results, collections_map=col_map, fields=fields)
     else:
         zot   = _zot()
         items = _fetch_items(zot, st["collection_key"])
@@ -521,7 +558,7 @@ def cmd_find(args):
                                                item_type=item_type)
         results = _finder.find_in_collection(items, pattern=pattern, field=field,
                                              item_type=item_type if not tags else None)
-        _fmt.print_find_results(results)
+        _fmt.print_find_results(results, fields=fields)
 
 
 def cmd_connect(args):
@@ -616,6 +653,23 @@ def cmd_config(args):
     print(f"Set {dotpath} = {value}")
 
 
+def cmd_help(args):
+    print("""Usage: zotcli <command> [args]
+
+Navigation:  cd [path]  pwd  tree [--depth N] [--no-items]
+Listing:     ls [path] [--sort <f>] [--reverse] [--unfiled] [--fields <csv>]
+Reading:     cat <item>[:<child>]
+Searching:   find <pattern> [--field <f>] [--scope library] [--tag <t>] [--type <t>] [--fields <csv>]
+Exporting:   get <item> [--bibtex|--json|--bib] [--style <csl>]
+             get <item>:<child> [-o <path>]
+Setup:       connect  sync  off  config [key [value]]
+Python:      py  py -c '<code>'  py <script.py>
+
+Field aliases for --fields: label, title, citation_key (ck), author (creator), year, type, meta, key
+Global flags: --fresh
+""")
+
+
 # ---------------------------------------------------------------------------
 # Hidden subcommands (used internally by shell / tab completion)
 # ---------------------------------------------------------------------------
@@ -691,6 +745,65 @@ def cmd__complete(args):
             print(f"{path_prefix}{name}/\tcollection")
 
 
+def cmd__complete_items(args):
+    """
+    Item/child completion helper.
+
+    Modes:
+      - item: complete citation keys/item keys in current collection
+      - ref:  complete item refs and item:child refs for cat/get
+    """
+    mode = args[0] if args else "item"
+    cur = args[1] if len(args) > 1 else ""
+
+    st = _state.read_state()
+    if st.get("collection_key") is None:
+        return
+
+    zot = _zot()
+    items = _fetch_items(zot, st["collection_key"])
+    bib_items = [it for it in items if it.get("data", it).get("itemType") not in ("attachment", "note")]
+
+    # item-only completion
+    if mode == "item":
+        prefix = cur
+        for it in bib_items:
+            data = it.get("data", it)
+            label = _completion_item_label(data)
+            if label and (not prefix or label.startswith(prefix)):
+                print(f"{label}\titem")
+        return
+
+    # ref completion (item + item:child)
+    item_part, has_colon, child_part = cur.partition(":")
+    matched_items = []
+    for it in bib_items:
+        data = it.get("data", it)
+        label = _completion_item_label(data)
+        key = data.get("key", "")
+        if not item_part or label.startswith(item_part) or key.startswith(item_part):
+            matched_items.append((label, key))
+
+    # If user hasn't typed colon yet, suggest item labels only.
+    if not has_colon:
+        for label, _ in matched_items:
+            if label:
+                print(f"{label}\titem")
+        return
+
+    # After colon, suggest child references.
+    for label, item_key in matched_items:
+        try:
+            children = zot.children(item_key)
+        except Exception:
+            continue
+        for child in children:
+            data = child.get("data", child)
+            child_name = data.get("filename") or data.get("title") or data.get("key", "")
+            if child_name and (not child_part or child_name.startswith(child_part)):
+                print(f"{label}:{child_name}\tchild")
+
+
 def cmd__spell_dir(args):
     """Print SPELL_DIR."""
     print(SPELL_DIR)
@@ -712,8 +825,12 @@ COMMANDS = {
     "sync":         cmd_sync,
     "off":          cmd_off,
     "config":       cmd_config,
+    "help":         cmd_help,
+    "--help":       cmd_help,
+    "-h":           cmd_help,
     # Hidden
     "_complete":    cmd__complete,
+    "_complete_items": cmd__complete_items,
     "_spell_dir":   cmd__spell_dir,
 }
 
