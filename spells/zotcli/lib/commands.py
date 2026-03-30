@@ -778,6 +778,7 @@ Exporting:   get <item> [--bibtex|--json|--bib] [--style <csl>]
              get <item>:<child> [-o <path>]
 Setup:       connect  sync  config [key [value]]
 Visual:      visual --on [--color <name>]  visual --off  visual (toggle)
+Interactive: nav (enter navigation mode — bare commands become zot commands)
 Python:      py  py -c '<code>'  py <script.py>
 
 Field aliases for --fields: label, title, citation_key (ck), author (creator), year, type, meta, key

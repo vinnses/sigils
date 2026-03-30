@@ -19,7 +19,7 @@ _zotcli() {
 
     COMP_WORDBREAKS="$OLD_IFS"
 
-    local subcommands="cd pwd ls tree cat get find sync connect config visual py help"
+    local subcommands="cd pwd ls tree cat get find sync connect config visual nav py help"
 
     # Find the subcommand (skip global flags)
     local subcmd=""

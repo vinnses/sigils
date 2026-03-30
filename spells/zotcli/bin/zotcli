@@ -47,6 +47,7 @@ case "$SUBCOMMAND" in
         echo "             get <item>:<child> [-o <path>]" >&2
         echo "Setup:       connect  sync  config [key [value]]" >&2
         echo "Visual:      visual --on [--color <name>]  visual --off  visual (toggle)" >&2
+        echo "Interactive: nav (navigation mode — bare commands become zot commands)" >&2
         echo "Python:      py  py -c '<code>'  py <script.py>" >&2
         echo "" >&2
         echo "Global flags: --fresh" >&2
