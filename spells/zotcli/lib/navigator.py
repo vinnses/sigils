@@ -105,7 +105,8 @@ def build_path(collections, key):
 def resolve_path(current_key, current_path, path_string, collections,
                  items=None, item_key=None,
                  previous_key=None, previous_path=None,
-                 previous_item_key=None):
+                 previous_item_key=None,
+                 conn=None):
     """
     Resolve path_string relative to (current_key, current_path).
 
@@ -117,7 +118,22 @@ def resolve_path(current_key, current_path, path_string, collections,
       foo             relative name in current level
       ..              parent (from item: back to collection)
       -               previous location
+      .trash/.unfiled/.duplicates/.conflicts  virtual root nodes (conn required)
     """
+    # Virtual node delegation — requires a DB connection
+    if conn is not None and path_string not in ("-", "", "^"):
+        is_abs, rest = _strip_root_prefix(path_string)
+        raw = rest if is_abs else path_string
+        parts = [p for p in raw.split("/") if p]
+        if parts:
+            try:
+                from vfs import resolve_virtual
+                result = resolve_virtual(conn, parts)
+                if result is not None:
+                    return result
+            except ImportError:
+                pass
+
     if path_string == "-":
         if previous_path is None:
             raise ValueError("No previous location")

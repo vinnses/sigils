@@ -21,3 +21,16 @@ visual:
   auto: true               # auto-activate on navigation commands (cd)
   color: cyan              # cyan | green | yellow | red | blue | magenta | white | bright_*
   show_sync_age: true      # show sync age footer in listings
+
+# Local SQLite database
+db:
+  path: null               # null = data/zotcli.db (relative to SPELL_DIR)
+
+# Sync / mutation queue
+sync:
+  background: false        # spawn detached process for API flush (true = non-blocking)
+  max_retries: 3           # retry failed mutations up to N times before marking 'error'
+
+# Metadata editor (edit command)
+edit:
+  format: yaml             # yaml | json (temp file format for $EDITOR)
