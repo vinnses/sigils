@@ -16,13 +16,22 @@ Subcommands:
   pull      Pull images and restart (pull + up -d)
   restart   Full restart (down + pull + up -d)
   clean     Remove services and images (down --rmi all)
+  purge     Clean + remove volumes (down --rmi all --volumes)
   status    Show service status (docker compose ps)
+  ls        List projects on device (optionally only up or down)
+  cd        Print absolute project path (use with: cd "$(arcane cd <project>)")
+  run       Run an arbitrary command in each selected project
+  exec      Alias for run
+  favorites Generate one portable bookmarks HTML with nginx URLs grouped by device/project
   dump      Backup all .env files to encrypted 7z archive
   restore   Restore .env files from 7z archive
 
 Options:
   -d, --device <name>     Target device (default: hostname)
   -e, --exclude <names>   Exclude projects from batch operation
+  -o, --output <path>     Output path for favorites (only with favorites)
+      --up                Only for ls: show running projects
+      --down              Only for ls: show stopped projects
 
 Environment:
   ARCANE_DIR   Arcane repository path (default: ~/arcane)
@@ -50,9 +59,80 @@ case "${1:-}" in
         shift
         _arcane_each "docker compose down --rmi all" "$@"
         ;;
+    purge)
+        shift
+        _arcane_each "docker compose down --rmi all --volumes" "$@"
+        ;;
     status)
         shift
         _arcane_each "docker compose ps" "$@"
+        ;;
+    ls)
+        shift
+        ls_mode="all"
+        seen_up=false
+        seen_down=false
+        ls_args=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --up)
+                    seen_up=true
+                    ls_mode="up"
+                    shift
+                    ;;
+                --down)
+                    seen_down=true
+                    ls_mode="down"
+                    shift
+                    ;;
+                *)
+                    ls_args+=("$1")
+                    shift
+                ;;
+            esac
+        done
+        if $seen_up && $seen_down; then
+            echo "error: choose only one of --up or --down" >&2
+            exit 1
+        fi
+        _arcane_ls "$ls_mode" "${ls_args[@]}"
+        ;;
+    cd)
+        shift
+        _arcane_cd "$@"
+        ;;
+    run|exec)
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "error: run/exec requires a command. Use: arcane run [filters...] -- <command>" >&2
+            exit 1
+        fi
+
+        args=("$@")
+        split=-1
+        for i in "${!args[@]}"; do
+            if [[ "${args[$i]}" == "--" ]]; then
+                split="$i"
+                break
+            fi
+        done
+
+        if [[ "$split" -lt 0 ]]; then
+            echo "error: missing '--' separator. Example: arcane run -d $(hostname) -- docker compose config" >&2
+            exit 1
+        fi
+
+        filters=("${args[@]:0:split}")
+        cmd=("${args[@]:split+1}")
+        if [[ ${#cmd[@]} -eq 0 ]]; then
+            echo "error: missing command after '--'" >&2
+            exit 1
+        fi
+        _arcane_each "${cmd[*]}" "${filters[@]}"
+        ;;
+    favorites)
+        shift
+        _arcane_favorites "$@"
         ;;
     dump)
         _arcane_dump
