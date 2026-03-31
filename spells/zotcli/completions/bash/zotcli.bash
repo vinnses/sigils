@@ -127,5 +127,8 @@ _zotcli() {
     esac
 }
 
+# Completions can be disabled with: export ZOTCLI_COMPLETIONS=0
+[[ "${ZOTCLI_COMPLETIONS:-1}" == "0" ]] && return 0
+
 complete -F _zotcli zotcli
 complete -F _zotcli zot

@@ -88,8 +88,10 @@ def _print_sync_footer(conn=None):
 
 
 def _fetch_items(zot, col_key):
-    """Fetch items for a collection. Returns [] at root."""
+    """Fetch items for a collection. Returns [] at root or for virtual nodes."""
     if col_key is None:
+        return []
+    if _vfs.is_virtual_key(col_key):
         return []
     try:
         return zot.everything(zot.collection_items(col_key))
@@ -168,15 +170,17 @@ def cmd_cd(args):
     # Fetch items for item navigation if we're in a collection
     items = None
     if st["collection_key"] is not None and path_arg not in ("^", ""):
-        # Try local DB first; fall back to API
-        if st["collection_key"]:
+        virtual_name = _vfs.is_virtual_key(st["collection_key"])
+        if virtual_name:
+            items = _vfs.list_node(conn, None, virtual=virtual_name)["items"]
+        else:
             items = _db.get_items_in_collection(conn, st["collection_key"])
-        if not items:
-            try:
-                zot = _zot()
-                items = _fetch_items(zot, st["collection_key"])
-            except SystemExit:
-                pass  # No credentials: collection-only navigation
+            if not items:
+                try:
+                    zot = _zot()
+                    items = _fetch_items(zot, st["collection_key"])
+                except SystemExit:
+                    pass  # No credentials: collection-only navigation
 
     try:
         new_col_key, new_col_path, new_item_key, new_item_label = _nav.resolve_path(
@@ -992,7 +996,7 @@ def cmd__complete(args):
 
 def cmd__complete_items(args):
     """
-    Item/child completion helper.
+    Item/child completion helper — local DB only, never calls the API.
 
     Modes:
       - item: complete citation keys/item keys in current collection
@@ -1005,8 +1009,15 @@ def cmd__complete_items(args):
     if st.get("collection_key") is None:
         return
 
-    zot = _zot()
-    items = _fetch_items(zot, st["collection_key"])
+    conn = _open_db()
+    virtual_name = _vfs.is_virtual_key(st["collection_key"])
+    if virtual_name:
+        items = _vfs.list_node(conn, None, virtual=virtual_name)["items"]
+    else:
+        items = _db.get_items_in_collection(conn, st["collection_key"])
+    if not items:
+        return
+
     bib_items = [it for it in items if it.get("data", it).get("itemType") not in ("attachment", "note")]
 
     # item-only completion
@@ -1036,12 +1047,9 @@ def cmd__complete_items(args):
                 print(f"{label}\titem")
         return
 
-    # After colon, suggest child references.
+    # After colon, suggest child references from local DB.
     for label, item_key in matched_items:
-        try:
-            children = zot.children(item_key)
-        except Exception:
-            continue
+        children = _db.get_attachments_by_parent(conn, item_key)
         for child in children:
             data = child.get("data", child)
             child_name = data.get("filename") or data.get("title") or data.get("key", "")

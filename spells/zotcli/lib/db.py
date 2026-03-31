@@ -273,6 +273,16 @@ def upsert_attachments(conn, attachments):
             )
 
 
+def get_attachments_by_parent(conn, parent_key):
+    """Return child attachments/notes for a parent item."""
+    rows = conn.execute(
+        "SELECT key, version, data_json FROM attachments WHERE parent_key = ?",
+        (parent_key,),
+    ).fetchall()
+    return [{"key": r["key"], "version": r["version"],
+             "data": json.loads(r["data_json"])} for r in rows]
+
+
 def get_items_in_collection(conn, col_key):
     """Return items belonging to a collection as pyzotero-shaped dicts."""
     rows = conn.execute(
