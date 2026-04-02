@@ -343,6 +343,12 @@ def print_tree(collections, parent_key=None, prefix="", depth=None, _current=0,
             print(f"{prefix}{connector}{_c(CYAN, label)}  {itype}  {meta}")
 
 
+def print_sync_footer(age):
+    """Print sync age as a footer line after listings."""
+    if age:
+        print(_c(DIM, f"[zotero last sync {age}]"))
+
+
 def error(msg):
     """Print an error to stderr."""
     if sys.stderr.isatty():

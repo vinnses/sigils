@@ -19,20 +19,45 @@ sys.path.insert(0, os.path.join(SPELL_DIR, "lib"))
 
 import cache      as _cache
 import config     as _config
+import db         as _db
 import finder     as _finder
 import formatters as _fmt
+import mutations  as _mut
 import navigator  as _nav
 import state      as _state
+import sync       as _sync
+import vfs        as _vfs
 
 
 def _fresh():
     return os.environ.get("ZOTCLI_FRESH", "false") == "true"
 
 
-def _collections():
+def _open_db():
+    """Open (or reuse) the SQLite DB connection for this invocation."""
+    return _db.open_db()
+
+
+def _collections(conn=None):
+    """
+    Return the collection list, preferring the SQLite DB.
+    Falls back to cache.py (which calls the API) on cold start or forced refresh.
+    """
+    if conn is not None:
+        cols = _db.get_collections(conn)
+        if cols and not _fresh():
+            return cols
+
     cfg = _config.load_config()
     ttl = _config.get_value(cfg, "cache.ttl_seconds") or 3600
-    return _cache.get_collections(fresh=_fresh(), ttl_seconds=ttl)
+    raw = _cache.get_collections(fresh=_fresh(), ttl_seconds=ttl)
+
+    if conn is not None:
+        _db.upsert_collections(conn, raw)
+        _db.record_sync(conn)
+        return _db.get_collections(conn)
+
+    return raw
 
 
 def _zot():
@@ -52,15 +77,21 @@ def _emit_state_env(st):
     _emit_env(ZOTCLI_PATH=path)
 
 
-def _emit_sync_age():
-    """Emit ZOTCLI_SYNC_AGE after a cache operation."""
-    age = _cache.sync_age_human()
-    _emit_env(ZOTCLI_SYNC_AGE=age)
+def _print_sync_footer(conn=None):
+    """Print sync age footer after listing commands."""
+    if conn is not None:
+        age = _db.sync_age_human(conn)
+    else:
+        age = _cache.sync_age_human()
+    if age:
+        _fmt.print_sync_footer(age)
 
 
 def _fetch_items(zot, col_key):
-    """Fetch items for a collection. Returns [] at root."""
+    """Fetch items for a collection. Returns [] at root or for virtual nodes."""
     if col_key is None:
+        return []
+    if _vfs.is_virtual_key(col_key):
         return []
     try:
         return zot.everything(zot.collection_items(col_key))
@@ -116,14 +147,14 @@ def _parse_ref(ref):
 
 
 def _completion_item_label(item_data):
-    """Best-effort completion label: citation key, item key, or title."""
+    """Best-effort completion label: citation key, title, or item key."""
     ck = _fmt.get_citation_key(item_data)
     if ck:
         return ck
-    key = item_data.get("key", "")
-    if key:
-        return key
-    return item_data.get("title", "")
+    title = item_data.get("title", "")
+    if title:
+        return title
+    return item_data.get("key", "")
 
 
 # ---------------------------------------------------------------------------
@@ -133,16 +164,23 @@ def _completion_item_label(item_data):
 def cmd_cd(args):
     path_arg = args[0] if args else "^"
     st = _state.read_state()
-    collections = _collections()
+    conn = _open_db()
+    collections = _collections(conn)
 
     # Fetch items for item navigation if we're in a collection
     items = None
     if st["collection_key"] is not None and path_arg not in ("^", ""):
-        try:
-            zot = _zot()
-            items = _fetch_items(zot, st["collection_key"])
-        except SystemExit:
-            pass  # No credentials: collection-only navigation
+        virtual_name = _vfs.is_virtual_key(st["collection_key"])
+        if virtual_name:
+            items = _vfs.list_node(conn, None, virtual=virtual_name)["items"]
+        else:
+            items = _db.get_items_in_collection(conn, st["collection_key"])
+            if not items:
+                try:
+                    zot = _zot()
+                    items = _fetch_items(zot, st["collection_key"])
+                except SystemExit:
+                    pass  # No credentials: collection-only navigation
 
     try:
         new_col_key, new_col_path, new_item_key, new_item_label = _nav.resolve_path(
@@ -155,6 +193,7 @@ def cmd_cd(args):
             previous_key=st.get("previous_collection_key"),
             previous_path=st.get("previous_collection_path"),
             previous_item_key=st.get("previous_item_key"),
+            conn=conn,
         )
     except ValueError as e:
         _fmt.error(str(e))
@@ -170,9 +209,8 @@ def cmd_cd(args):
         previous_item_key=st.get("item_key"),
     )
     new_st = _state.read_state()
-    display = _state.full_path(new_st)
-    print(display)
     _emit_state_env(new_st)
+    _maybe_auto_activate()
 
 
 def cmd_pwd(args):
@@ -213,6 +251,10 @@ def cmd_ls(args):
             positional.append(args[i])
             i += 1
 
+    # Use config default fields if --fields not specified
+    if not fields_spec:
+        fields_spec = _config.get_value(cfg, "ls.default_fields")
+
     try:
         fields = _fmt.normalize_fields(fields_spec, context="ls")
     except ValueError as e:
@@ -220,7 +262,8 @@ def cmd_ls(args):
         sys.exit(1)
 
     st = _state.read_state()
-    collections = _collections()
+    conn = _open_db()
+    collections = _collections(conn)
 
     # If inside an item, list its children
     if st.get("item_key") and not positional and not unfiled:
@@ -229,29 +272,54 @@ def cmd_ls(args):
         _fmt.print_children(children)
         return
 
-    # Unfiled: list items with no collection
+    # Unfiled: list items with no collection (supported both as flag and via ^/.unfiled)
     if unfiled:
-        if st["collection_key"] is not None:
+        if st["collection_key"] is not None and not _vfs.is_virtual_key(st["collection_key"]):
             _fmt.error("--unfiled is only available at root (^)")
             sys.exit(1)
-        zot = _zot()
-        all_items = zot.everything(zot.items())
-        unfiled_items = [
-            it for it in all_items
-            if not it.get("data", it).get("collections")
-            and it.get("data", it).get("itemType") not in ("attachment", "note")
-        ]
+        unfiled_items = _db.get_unfiled_items(conn)
+        if not unfiled_items:
+            # Fall back to API if DB is cold
+            try:
+                zot = _zot()
+                all_items = zot.everything(zot.items())
+                unfiled_items = [
+                    it for it in all_items
+                    if not it.get("data", it).get("collections")
+                    and it.get("data", it).get("itemType") not in ("attachment", "note")
+                ]
+                _db.upsert_items(conn, all_items)
+            except Exception:
+                pass
         _fmt.print_ls([], unfiled_items, sort_key=sort_key, reverse=reverse, fields=fields)
+        _print_sync_footer(conn)
+        return
+
+    # Virtual node listing (e.g. after `cd .trash`)
+    virtual_name = _vfs.is_virtual_key(st.get("collection_key"))
+    if virtual_name and not positional:
+        node = _vfs.list_node(conn, None, virtual=virtual_name)
+        _fmt.print_ls(node["collections"], node["items"],
+                      sort_key=sort_key, reverse=reverse, fields=fields)
+        _print_sync_footer(conn)
         return
 
     if not positional:
-        # List current collection
+        # List current collection via DB, fall back to API for items
         target_key = st["collection_key"]
-        sub_cols   = _nav.get_children(collections, target_key)
-        zot        = _zot()
-        items      = _fetch_items(zot, target_key)
+        node = _vfs.list_node(conn, target_key)
+        sub_cols = node["collections"]
+        items    = node["items"]
+        if target_key and not items:
+            try:
+                zot   = _zot()
+                items = _fetch_items(zot, target_key)
+                _db.upsert_items(conn, items)
+            except Exception:
+                pass
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
                       current_collection_key=target_key, fields=fields)
+        _print_sync_footer(conn)
         return
 
     ref = positional[0]
@@ -263,12 +331,21 @@ def cmd_ls(args):
             current_path=st["collection_path"],
             path_string=ref,
             collections=collections,
+            conn=conn,
         )
-        sub_cols = _nav.get_children(collections, target_key)
-        zot      = _zot()
-        items    = _fetch_items(zot, target_key)
+        node     = _vfs.list_node(conn, target_key)
+        sub_cols = node["collections"]
+        items    = node["items"]
+        if target_key and not _vfs.is_virtual_key(target_key) and not items:
+            try:
+                zot   = _zot()
+                items = _fetch_items(zot, target_key)
+                _db.upsert_items(conn, items)
+            except Exception:
+                pass
         _fmt.print_ls(sub_cols, items, sort_key=sort_key, reverse=reverse,
                       current_collection_key=target_key, fields=fields)
+        _print_sync_footer(conn)
     except ValueError:
         # Not a collection — treat as item reference, list children
         zot   = _zot()
@@ -308,7 +385,8 @@ def cmd_tree(args):
             i += 1
 
     st = _state.read_state()
-    collections = _collections()
+    conn = _open_db()
+    collections = _collections(conn)
     zot = _zot() if show_items else None
     _fmt.print_tree(collections, parent_key=st["collection_key"], depth=depth, zot=zot)
 
@@ -320,6 +398,16 @@ def cmd_cat(args):
 
     st = _state.read_state()
     item_ref, child_ref = _parse_ref(args[0])
+
+    # '.' means current item
+    if item_ref == "." and child_ref is None:
+        if not st.get("item_key"):
+            _fmt.error("Not inside an item. Use 'zot cd <item>' first.")
+            sys.exit(1)
+        zot = _zot()
+        item = zot.item(st["item_key"])
+        _fmt.print_item_info(item)
+        return
 
     # If inside an item and ref looks like a child, resolve from current item
     if st.get("item_key") and child_ref is None:
@@ -444,6 +532,10 @@ def cmd_get(args):
                 print(result if isinstance(result, str) else result.decode())
             else:
                 print(result)
+        except AttributeError:
+            _fmt.error("BibTeX export failed (bibtexparser/pyparsing version conflict).\n"
+                       "  Try: zotcli get --json " + item_ref)
+            sys.exit(1)
         finally:
             zot.add_parameters(format="json")
         return
@@ -528,37 +620,61 @@ def cmd_find(args):
         sys.exit(1)
 
     st = _state.read_state()
+    conn = _open_db()
 
     if scope == "library":
-        zot = _zot()
-        # For multiple tags, run iteratively (AND logic)
-        base_tag = tags[0] if tags else None
-        results = _finder.find_in_library(zot, pattern, field=field,
-                                          tag=base_tag, item_type=item_type)
-        for extra_tag in tags[1:]:
-            results = [r for r in results
-                       if extra_tag.lower() in [
-                           t.get("tag", "").lower()
-                           for t in r.get("data", r).get("tags", [])
-                       ]]
-
-        # Build collections map for display
-        collections = _collections()
-        col_map = {}
-        for col in collections:
-            data = col.get("data", col)
-            col_map[data.get("key", "")] = _nav.build_path(collections, data.get("key"))
-
-        _fmt.print_find_results(results, collections_map=col_map, fields=fields)
+        # Prefer local DB search; fall back to API
+        db_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        if db_count > 0:
+            results = _finder.find_in_db(
+                conn, pattern, field=field,
+                tags=tags if tags else None,
+                item_type=item_type,
+            )
+            collections = _collections(conn)
+            col_map = {}
+            for col in collections:
+                data = col.get("data", col)
+                col_map[data.get("key", "")] = _nav.build_path(collections, data.get("key"))
+            _fmt.print_find_results(results, collections_map=col_map, fields=fields)
+        else:
+            zot = _zot()
+            base_tag = tags[0] if tags else None
+            results = _finder.find_in_library(zot, pattern, field=field,
+                                              tag=base_tag, item_type=item_type)
+            for extra_tag in tags[1:]:
+                results = [r for r in results
+                           if extra_tag.lower() in [
+                               t.get("tag", "").lower()
+                               for t in r.get("data", r).get("tags", [])
+                           ]]
+            collections = _collections(conn)
+            col_map = {}
+            for col in collections:
+                data = col.get("data", col)
+                col_map[data.get("key", "")] = _nav.build_path(collections, data.get("key"))
+            _fmt.print_find_results(results, collections_map=col_map, fields=fields)
+        _print_sync_footer(conn)
     else:
-        zot   = _zot()
-        items = _fetch_items(zot, st["collection_key"])
-        for tag in tags:
-            items = _finder.find_in_collection(items, pattern=None, tag=tag,
-                                               item_type=item_type)
-        results = _finder.find_in_collection(items, pattern=pattern, field=field,
-                                             item_type=item_type if not tags else None)
+        # Collection-scoped: prefer DB
+        db_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        if db_count > 0:
+            results = _finder.find_in_db(
+                conn, pattern, field=field,
+                collection_key=st["collection_key"],
+                tags=tags if tags else None,
+                item_type=item_type,
+            )
+        else:
+            zot   = _zot()
+            items = _fetch_items(zot, st["collection_key"])
+            for tag in tags:
+                items = _finder.find_in_collection(items, pattern=None, tag=tag,
+                                                   item_type=item_type)
+            results = _finder.find_in_collection(items, pattern=pattern, field=field,
+                                                 item_type=item_type if not tags else None)
         _fmt.print_find_results(results, fields=fields)
+        _print_sync_footer(conn)
 
 
 def cmd_connect(args):
@@ -616,19 +732,110 @@ def cmd_connect(args):
 
 
 def cmd_sync(args):
+    """Refresh collection tree and index all items into the local SQLite DB."""
     _cache.invalidate()
+    conn = _open_db()
+
+    print("Fetching collection tree…", file=sys.stderr)
     collections = _cache.get_collections(fresh=True)
-    print(f"Synced {len(collections)} collections.", file=sys.stderr)
-    _emit_sync_age()
+    _db.upsert_collections(conn, collections)
+    print(f"  {len(collections)} collections indexed.", file=sys.stderr)
+
+    # Optionally index items per collection for offline ls/find
+    try:
+        zot = _zot()
+        print("Fetching items (this may take a moment)…", file=sys.stderr)
+        all_items = zot.everything(zot.items())
+        top_items = [it for it in all_items
+                     if it.get("data", it).get("itemType") not in ("attachment", "note")]
+        _db.upsert_items(conn, top_items)
+        print(f"  {len(top_items)} items indexed.", file=sys.stderr)
+    except Exception as e:
+        print(f"  Warning: could not index items: {e}", file=sys.stderr)
+
+    _db.record_sync(conn)
+    _print_sync_footer(conn)
+
+
+def _visual_color_code():
+    """Return the ANSI escape for the configured visual color."""
+    cfg = _config.load_config()
+    color_name = _config.get_value(cfg, "visual.color") or "cyan"
+    return _ANSI_COLORS.get(color_name.lower(), "\\e[36m")
+
+
+def _maybe_auto_activate():
+    """Emit visual activation if visual.auto is enabled and not already active."""
+    if os.environ.get("ZOTCLI_VISUAL") == "1":
+        return
+    cfg = _config.load_config()
+    auto = _config.get_value(cfg, "visual.auto")
+    if auto is False:
+        return
+    _emit_env(ZOTCLI_VISUAL="1", ZOTCLI_PROMPT_COLOR=_visual_color_code())
+
+
+def cmd_visual(args):
+    """Activate/deactivate the visual mode (PS1 path display).
+
+    Usage:
+      zotcli visual --on [--color <name>]   Activate visual mode
+      zotcli visual --off                   Deactivate visual mode
+      zotcli visual                         Toggle
+    """
+    color_name = None
+    activate = None
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--on":
+            activate = True
+            i += 1
+        elif args[i] == "--off":
+            activate = False
+            i += 1
+        elif args[i] == "--color" and i + 1 < len(args):
+            color_name = args[i + 1]
+            i += 2
+        elif args[i].startswith("--color="):
+            color_name = args[i][8:]
+            i += 1
+        else:
+            i += 1
+
+    # Toggle if no explicit flag
+    if activate is None:
+        activate = os.environ.get("ZOTCLI_VISUAL") != "1"
+
+    if activate:
+        color_code = _visual_color_code()
+        if color_name:
+            code = _ANSI_COLORS.get(color_name.lower())
+            if code is None:
+                _fmt.error(f"Unknown color {color_name!r}. Valid: {', '.join(sorted(_ANSI_COLORS))}")
+                sys.exit(1)
+            color_code = code
+
+        _emit_env(ZOTCLI_VISUAL="1", ZOTCLI_PROMPT_COLOR=color_code)
+
+        # Also emit current path so the prompt shows immediately
+        st = _state.read_state()
+        _emit_state_env(st)
+    else:
+        _emit_env(ZOTCLI_VISUAL="", ZOTCLI_PATH="",
+                  ZOTCLI_PROMPT_COLOR="")
 
 
 def cmd_off(args):
-    """Deactivate visual mode and reset navigation state to root."""
+    """Deactivate visual mode and reset navigation state to root.
+
+    DEPRECATED: Use 'zotcli visual --off' to hide the prompt,
+    or 'zotcli cd ^' to go to root.
+    """
+    print("[deprecated] Use 'zot visual --off' + 'zot cd ^' instead.", file=sys.stderr)
     _state.reset_state()
-    # The shell wrapper handles unsetting ZOTCLI_VISUAL, ZOTCLI_PATH, ZOTCLI_SYNC_AGE
-    # and removing __zotcli_hook from PROMPT_COMMAND.
-    # We just emit the env vars to clear them.
-    _emit_env(ZOTCLI_PATH="^")
+    _emit_env(ZOTCLI_VISUAL="", ZOTCLI_PATH="",
+              ZOTCLI_PROMPT_COLOR="")
 
 
 def cmd_config(args):
@@ -654,90 +861,22 @@ def cmd_config(args):
 
 
 _ANSI_COLORS = {
-    "black":          "\\[\\e[30m\\]",
-    "red":            "\\[\\e[31m\\]",
-    "green":          "\\[\\e[32m\\]",
-    "yellow":         "\\[\\e[33m\\]",
-    "blue":           "\\[\\e[34m\\]",
-    "magenta":        "\\[\\e[35m\\]",
-    "cyan":           "\\[\\e[36m\\]",
-    "white":          "\\[\\e[37m\\]",
-    "bright_red":     "\\[\\e[91m\\]",
-    "bright_green":   "\\[\\e[92m\\]",
-    "bright_yellow":  "\\[\\e[93m\\]",
-    "bright_blue":    "\\[\\e[94m\\]",
-    "bright_magenta": "\\[\\e[95m\\]",
-    "bright_cyan":    "\\[\\e[96m\\]",
-    "bright_white":   "\\[\\e[97m\\]",
+    "black":          "\\e[30m",
+    "red":            "\\e[31m",
+    "green":          "\\e[32m",
+    "yellow":         "\\e[33m",
+    "blue":           "\\e[34m",
+    "magenta":        "\\e[35m",
+    "cyan":           "\\e[36m",
+    "white":          "\\e[37m",
+    "bright_red":     "\\e[91m",
+    "bright_green":   "\\e[92m",
+    "bright_yellow":  "\\e[93m",
+    "bright_blue":    "\\e[94m",
+    "bright_magenta": "\\e[95m",
+    "bright_cyan":    "\\e[96m",
+    "bright_white":   "\\e[97m",
 }
-_ANSI_RESET = "\\[\\e[0m\\]"
-
-
-def cmd_shell_init(args):
-    """Print a bash snippet for eval.
-
-    Usage: eval "$(command zotcli shell-init [--mode session|static|off] [--color <name>])"
-
-    Modes:
-      session  Install __zotcli_prompt_apply into PROMPT_COMMAND (default).
-               Session-only — does NOT touch dotfiles.
-      static   Print inline snippet to paste inside _update_prompt.
-      off      Print a no-op comment (disables via config without removing the eval line).
-    """
-    cfg   = _config.load_config()
-    mode  = _config.get_value(cfg, "prompt.mode")  or "session"
-    color = _config.get_value(cfg, "prompt.color") or "cyan"
-
-    i = 0
-    while i < len(args):
-        if args[i] == "--mode" and i + 1 < len(args):
-            mode = args[i + 1]; i += 2
-        elif args[i].startswith("--mode="):
-            mode = args[i][7:]; i += 1
-        elif args[i] == "--color" and i + 1 < len(args):
-            color = args[i + 1]; i += 2
-        elif args[i].startswith("--color="):
-            color = args[i][8:]; i += 1
-        else:
-            i += 1
-
-    if mode not in ("session", "static", "off"):
-        _fmt.error("--mode must be one of: session, static, off")
-        sys.exit(1)
-
-    if mode == "off":
-        print("# zotcli shell-init: mode=off, no prompt hook installed")
-        return
-
-    ansi = _ANSI_COLORS.get(color.lower())
-    if ansi is None:
-        _fmt.error(f"Unknown color {color!r}. Valid: {', '.join(sorted(_ANSI_COLORS))}")
-        sys.exit(1)
-
-    reset = _ANSI_RESET
-    if mode == "static":
-        print(f"""\
-# zotcli prompt snippet — paste INSIDE your _update_prompt / prompt function
-# Requires __zotcli_ps1 from completions/bash/zotcli.bash
-local _zot_info
-_zot_info="$(__zotcli_ps1)"
-if [[ -n "$_zot_info" ]]; then
-    PS1+="{ansi}${{_zot_info}}{reset} "
-fi""")
-    else:  # session
-        print(f"""\
-# zotcli session prompt hook — eval this to activate for the current shell
-# Does NOT modify ~/.bashrc or any dotfile
-__zotcli_prompt_apply() {{
-  local _zot_info
-  _zot_info="$(__zotcli_ps1)"
-  [[ -z "$_zot_info" ]] && return
-  PS1="${{PS1%{ansi}*{reset}}}{ansi}${{_zot_info}}{reset} "
-}}
-case ";${{PROMPT_COMMAND}};" in
-  *";__zotcli_prompt_apply;"*) ;;
-  *) PROMPT_COMMAND="${{PROMPT_COMMAND:+${{PROMPT_COMMAND}}; }}__zotcli_prompt_apply" ;;
-esac""")
 
 
 def cmd_help(args):
@@ -749,8 +888,19 @@ Reading:     cat <item>[:<child>]
 Searching:   find <pattern> [--field <f>] [--scope library] [--tag <t>] [--type <t>] [--fields <csv>]
 Exporting:   get <item> [--bibtex|--json|--bib] [--style <csl>]
              get <item>:<child> [-o <path>]
-Setup:       connect  sync  off  config [key [value]]
-             shell-init [--mode session|static|off] [--color <name>]
+Collections: mkdir <name>
+             rmdir <path> [--trash-items]
+Items:       cp <item> <dest_collection>
+             mv <item> <dest_collection|new_name>
+             rm [--trash] <item>
+             edit <item> [--json]
+             set <item> <field> <value>
+Attachments: touch <item>:<note_name>
+             import <file_path> <item>[:<attachment_name>]
+Virtual dirs: ^/.trash  ^/.unfiled  ^/.duplicates  ^/.conflicts
+Setup:       connect  sync  config [key [value]]
+Visual:      visual --on [--color <name>]  visual --off  visual (toggle)
+Interactive: nav (enter navigation mode — bare commands become zot commands)
 Python:      py  py -c '<code>'  py <script.py>
 
 Field aliases for --fields: label, title, citation_key (ck), author (creator), year, type, meta, key
@@ -769,11 +919,19 @@ def cmd__complete(args):
 
     Handles both absolute (zot:// or z://) and relative paths.
     """
-    cached = _cache.load_cache()
-    if not cached:
-        return
+    conn = _open_db()
+    db_cols = _db.get_collections(conn)
+    if db_cols:
+        collections = db_cols
+    else:
+        cached = _cache.load_cache()
+        if not cached:
+            return
+        collections = cached.get("collections", [])
 
-    collections = cached.get("collections", [])
+    # Also add virtual node stubs for root completion
+    virtual_stubs = _vfs.virtual_node_entries()
+
     st          = _state.read_state()
     path_arg    = args[0] if args else ""
 
@@ -827,6 +985,9 @@ def cmd__complete(args):
             path_prefix = ""
 
     children = _nav.get_children(collections, parent_key)
+    # Inject virtual nodes at root level
+    if parent_key is None:
+        children = list(children) + virtual_stubs
     for col in children:
         name = col.get("data", col).get("name", "")
         if not prefix or name.startswith(prefix):
@@ -835,7 +996,7 @@ def cmd__complete(args):
 
 def cmd__complete_items(args):
     """
-    Item/child completion helper.
+    Item/child completion helper — local DB only, never calls the API.
 
     Modes:
       - item: complete citation keys/item keys in current collection
@@ -848,8 +1009,15 @@ def cmd__complete_items(args):
     if st.get("collection_key") is None:
         return
 
-    zot = _zot()
-    items = _fetch_items(zot, st["collection_key"])
+    conn = _open_db()
+    virtual_name = _vfs.is_virtual_key(st["collection_key"])
+    if virtual_name:
+        items = _vfs.list_node(conn, None, virtual=virtual_name)["items"]
+    else:
+        items = _db.get_items_in_collection(conn, st["collection_key"])
+    if not items:
+        return
+
     bib_items = [it for it in items if it.get("data", it).get("itemType") not in ("attachment", "note")]
 
     # item-only completion
@@ -879,12 +1047,9 @@ def cmd__complete_items(args):
                 print(f"{label}\titem")
         return
 
-    # After colon, suggest child references.
+    # After colon, suggest child references from local DB.
     for label, item_key in matched_items:
-        try:
-            children = zot.children(item_key)
-        except Exception:
-            continue
+        children = _db.get_attachments_by_parent(conn, item_key)
         for child in children:
             data = child.get("data", child)
             child_name = data.get("filename") or data.get("title") or data.get("key", "")
@@ -895,6 +1060,366 @@ def cmd__complete_items(args):
 def cmd__spell_dir(args):
     """Print SPELL_DIR."""
     print(SPELL_DIR)
+
+
+# ---------------------------------------------------------------------------
+# Write / mutation commands
+# ---------------------------------------------------------------------------
+
+def cmd_mkdir(args):
+    """Create a new collection (or sub-collection when inside one).
+
+    Usage: zotcli mkdir <name>
+    """
+    if not args:
+        _fmt.error("Usage: zotcli mkdir <name>")
+        sys.exit(1)
+    name = " ".join(args)
+    st   = _state.read_state()
+    conn = _open_db()
+    zot  = _zot()
+    try:
+        _mut.mkdir(conn, zot, name, parent_key=st.get("collection_key"))
+        print(f"Created collection '{name}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_rmdir(args):
+    """Delete a collection.
+
+    Usage: zotcli rmdir <collection_path> [--trash-items]
+    """
+    if not args:
+        _fmt.error("Usage: zotcli rmdir <collection_path> [--trash-items]")
+        sys.exit(1)
+
+    trash_items = "--trash-items" in args
+    positional  = [a for a in args if not a.startswith("--")]
+    if not positional:
+        _fmt.error("Provide a collection path")
+        sys.exit(1)
+
+    st          = _state.read_state()
+    conn        = _open_db()
+    collections = _collections(conn)
+    try:
+        col_key, _, _, _ = _nav.resolve_path(
+            st["collection_key"], st["collection_path"],
+            positional[0], collections, conn=conn,
+        )
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    if col_key is None:
+        _fmt.error("Cannot remove root")
+        sys.exit(1)
+
+    zot = _zot()
+    try:
+        _mut.rmdir(conn, zot, col_key, trash_items=trash_items)
+        print(f"Deleted collection '{positional[0]}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_cp(args):
+    """Link an item into a destination collection.
+
+    Usage: zotcli cp <item_ref> <dest_collection_path>
+    """
+    if len(args) < 2:
+        _fmt.error("Usage: zotcli cp <item_ref> <dest_collection_path>")
+        sys.exit(1)
+
+    item_ref  = args[0]
+    dest_path = args[1]
+    st        = _state.read_state()
+    conn      = _open_db()
+    collections = _collections(conn)
+
+    # Resolve destination collection
+    try:
+        dest_key, _, _, _ = _nav.resolve_path(
+            st["collection_key"], st["collection_path"],
+            dest_path, collections, conn=conn,
+        )
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+    if dest_key is None:
+        _fmt.error("Destination cannot be root")
+        sys.exit(1)
+
+    # Resolve item
+    items = _db.get_items_in_collection(conn, st["collection_key"]) if st["collection_key"] else []
+    if not items:
+        try:
+            items = _fetch_items(_zot(), st["collection_key"])
+        except Exception:
+            pass
+    try:
+        item = _find_item_strict(items, item_ref)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    item_key = item.get("data", item)["key"]
+    zot      = _zot()
+    try:
+        _mut.cp(conn, zot, item_key, dest_key)
+        print(f"Linked '{item_ref}' → '{dest_path}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_mv(args):
+    """Move an item to another collection, or rename it.
+
+    Usage: zotcli mv <item_ref> <dest_collection_path|new_name>
+    """
+    if len(args) < 2:
+        _fmt.error("Usage: zotcli mv <item_ref> <dest_collection_path|new_name>")
+        sys.exit(1)
+
+    item_ref = args[0]
+    dest     = args[1]
+    st       = _state.read_state()
+    conn     = _open_db()
+    collections = _collections(conn)
+
+    # Resolve item
+    items = _db.get_items_in_collection(conn, st["collection_key"]) if st["collection_key"] else []
+    if not items:
+        try:
+            items = _fetch_items(_zot(), st["collection_key"])
+        except Exception:
+            pass
+    try:
+        item = _find_item_strict(items, item_ref)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    item_key = item.get("data", item)["key"]
+    zot      = _zot()
+    try:
+        _mut.mv(conn, zot, item_key, dest, src_collection_key=st.get("collection_key"))
+        print(f"Moved '{item_ref}' → '{dest}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_rm(args):
+    """Unlink an item from the current collection, or trash it.
+
+    Usage: zotcli rm [--trash] <item_ref>
+    """
+    if not args:
+        _fmt.error("Usage: zotcli rm [--trash] <item_ref>")
+        sys.exit(1)
+
+    trash    = "--trash" in args
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        _fmt.error("Provide an item reference")
+        sys.exit(1)
+
+    item_ref = positional[0]
+    st       = _state.read_state()
+    conn     = _open_db()
+
+    items = _db.get_items_in_collection(conn, st["collection_key"]) if st["collection_key"] else []
+    if not items:
+        try:
+            items = _fetch_items(_zot(), st["collection_key"])
+        except Exception:
+            pass
+    try:
+        item = _find_item_strict(items, item_ref)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    item_key = item.get("data", item)["key"]
+    zot      = _zot()
+    action   = "Trashed" if trash else "Unlinked"
+    try:
+        _mut.rm(conn, zot, item_key,
+                collection_key=st.get("collection_key"),
+                trash=trash)
+        print(f"{action} '{item_ref}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_edit(args):
+    """Open item metadata in $EDITOR and PATCH changed fields.
+
+    Usage: zotcli edit <item_ref> [--json]
+    """
+    if not args:
+        _fmt.error("Usage: zotcli edit <item_ref> [--json]")
+        sys.exit(1)
+
+    use_json  = "--json" in args
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        _fmt.error("Provide an item reference")
+        sys.exit(1)
+
+    item_ref = positional[0]
+    st       = _state.read_state()
+    conn     = _open_db()
+
+    items = _db.get_items_in_collection(conn, st["collection_key"]) if st["collection_key"] else []
+    if not items:
+        try:
+            items = _fetch_items(_zot(), st["collection_key"])
+        except Exception:
+            pass
+    try:
+        item = _find_item_strict(items, item_ref)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    item_key = item.get("data", item)["key"]
+    zot      = _zot()
+    try:
+        _mut.edit(conn, zot, item_key, use_json=use_json)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_touch(args):
+    """Create a child note on an item.
+
+    Usage: zotcli touch <item_ref>:<note_name>
+    """
+    if not args:
+        _fmt.error("Usage: zotcli touch <item_ref>:<note_name>")
+        sys.exit(1)
+
+    ref_arg = args[0]
+    item_ref, note_name = _parse_ref(ref_arg)
+    note_name = note_name or ""
+
+    st   = _state.read_state()
+    conn = _open_db()
+
+    items = _db.get_items_in_collection(conn, st["collection_key"]) if st["collection_key"] else []
+    if not items:
+        try:
+            items = _fetch_items(_zot(), st["collection_key"])
+        except Exception:
+            pass
+    try:
+        item = _find_item_strict(items, item_ref)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    item_key = item.get("data", item)["key"]
+    zot      = _zot()
+    try:
+        _mut.touch(conn, zot, item_key, note_title=note_name)
+        print(f"Created note on '{item_ref}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_import(args):
+    """Upload a local file as a child attachment.
+
+    Usage: zotcli import <file_path> <item_ref>[:<attachment_name>]
+    """
+    if len(args) < 2:
+        _fmt.error("Usage: zotcli import <file_path> <item_ref>[:<attachment_name>]")
+        sys.exit(1)
+
+    file_path = args[0]
+    item_ref, att_name = _parse_ref(args[1])
+
+    st   = _state.read_state()
+    conn = _open_db()
+
+    items = _db.get_items_in_collection(conn, st["collection_key"]) if st["collection_key"] else []
+    if not items:
+        try:
+            items = _fetch_items(_zot(), st["collection_key"])
+        except Exception:
+            pass
+    try:
+        item = _find_item_strict(items, item_ref)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    item_key = item.get("data", item)["key"]
+    zot      = _zot()
+    try:
+        _mut.import_file(conn, zot, file_path, item_key, attachment_name=att_name)
+        print(f"Queued upload of '{file_path}' → '{item_ref}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd_set(args):
+    """Set a single field on an item directly.
+
+    Usage: zotcli set <item_ref> <field> <value>
+    """
+    if len(args) < 3:
+        _fmt.error("Usage: zotcli set <item_ref> <field> <value>")
+        sys.exit(1)
+
+    item_ref = args[0]
+    field    = args[1]
+    value    = " ".join(args[2:])
+
+    st   = _state.read_state()
+    conn = _open_db()
+
+    items = _db.get_items_in_collection(conn, st["collection_key"]) if st["collection_key"] else []
+    if not items:
+        try:
+            items = _fetch_items(_zot(), st["collection_key"])
+        except Exception:
+            pass
+    try:
+        item = _find_item_strict(items, item_ref)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+    item_key = item.get("data", item)["key"]
+    zot      = _zot()
+    try:
+        _mut.set_field(conn, zot, item_key, field, value)
+        print(f"Set '{field}' on '{item_ref}'.", file=sys.stderr)
+    except ValueError as e:
+        _fmt.error(str(e))
+        sys.exit(1)
+
+
+def cmd__sync_flush(args):
+    """Hidden: flush pending mutations (called by background worker)."""
+    conn = _open_db()
+    try:
+        zot = _zot()
+        _sync.flush_pending(conn, zot)
+    except SystemExit:
+        pass  # No credentials — nothing to flush
 
 
 # ---------------------------------------------------------------------------
@@ -913,14 +1438,25 @@ COMMANDS = {
     "sync":         cmd_sync,
     "off":          cmd_off,
     "config":       cmd_config,
-    "shell-init":   cmd_shell_init,
+    "visual":       cmd_visual,
     "help":         cmd_help,
     "--help":       cmd_help,
     "-h":           cmd_help,
+    # Write / mutation commands
+    "mkdir":        cmd_mkdir,
+    "rmdir":        cmd_rmdir,
+    "cp":           cmd_cp,
+    "mv":           cmd_mv,
+    "rm":           cmd_rm,
+    "edit":         cmd_edit,
+    "touch":        cmd_touch,
+    "import":       cmd_import,
+    "set":          cmd_set,
     # Hidden
-    "_complete":    cmd__complete,
+    "_complete":       cmd__complete,
     "_complete_items": cmd__complete_items,
-    "_spell_dir":   cmd__spell_dir,
+    "_spell_dir":      cmd__spell_dir,
+    "_sync_flush":     cmd__sync_flush,
 }
 
 

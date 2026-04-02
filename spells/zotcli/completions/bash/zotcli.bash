@@ -1,83 +1,8 @@
 #!/usr/bin/env bash
-# zotcli shell integration (v3)
-# Provides: shell wrapper, __zotcli_ps1, tab completions, zot() alias.
+# zotcli tab completions (v3)
+# Shell wrapper, __zotcli_ps1, and prompt hook are in inits/bash/zotcli.bash.
 #
-# Sourced automatically by the sigils init system.
-
-# ---------------------------------------------------------------------------
-# Shell wrapper — captures env var exports, forces colors, activates visual mode
-# ---------------------------------------------------------------------------
-
-zotcli() {
-    # 'off': reset state + clear visual env vars
-    if [[ "${1:-}" == "off" ]]; then
-        ZOTCLI_COLOR=1 command zotcli off "${@:2}"
-        unset ZOTCLI_VISUAL ZOTCLI_PATH ZOTCLI_SYNC_AGE
-        return 0
-    fi
-
-    # ZOTCLI_COLOR=1 forces ANSI codes even though stdout is a pipe
-    local output exitcode
-    output=$(ZOTCLI_COLOR=1 command zotcli "$@")
-    exitcode=$?
-
-    # Parse __ZOTCLI_ENV__ lines; print the rest
-    local line
-    while IFS= read -r line; do
-        if [[ "$line" == __ZOTCLI_ENV__* ]]; then
-            export "${line#__ZOTCLI_ENV__}"
-        else
-            printf '%s\n' "$line"
-        fi
-    done <<< "$output"
-
-    # Mark visual mode as active on first use (sets ZOTCLI_VISUAL=1)
-    if [[ -z "${ZOTCLI_VISUAL:-}" ]]; then
-        export ZOTCLI_VISUAL=1
-    fi
-
-    return $exitcode
-}
-
-zot() { zotcli "$@"; }
-
-# ---------------------------------------------------------------------------
-# PS1 helper — like git_status, returns info string when zotcli is active
-#
-# Returns nothing (empty) when ZOTCLI_VISUAL != 1, so it naturally
-# disappears when zotcli hasn't been used in this session.
-#
-# Integration with _update_prompt style prompts:
-#
-#   _update_prompt() {
-#       local EXIT_CODE=$?
-#       ...
-#       local zot_info="$(__zotcli_ps1)"
-#       if [[ -n "$zot_info" ]]; then
-#           local C_ZOT='\[\e[36m\]'
-#           PS1+="${C_ZOT}${zot_info}${C_RESET} "
-#       fi
-#       ...
-#   }
-#
-# Or inline in PS1 (simpler but runs a subshell each prompt):
-#   PS1+='$(__zotcli_ps1 " [%s]")'
-# ---------------------------------------------------------------------------
-
-__zotcli_ps1() {
-    [[ "${ZOTCLI_VISUAL:-}" != "1" ]] && return
-
-    local fmt="${1:-%s}"
-    local path="${ZOTCLI_PATH:-zot://}"
-    local sync="${ZOTCLI_SYNC_AGE:-}"
-    local info="$path"
-    [[ -n "$sync" ]] && info+=" [${sync}]"
-    printf -- "$fmt" "$info"
-}
-
-# ---------------------------------------------------------------------------
-# Tab completions
-# ---------------------------------------------------------------------------
+# Sourced automatically by the sigils init system (after inits).
 
 _zotcli() {
     # Temporarily remove ':' from COMP_WORDBREAKS so zot:// isn't split
@@ -94,7 +19,7 @@ _zotcli() {
 
     COMP_WORDBREAKS="$OLD_IFS"
 
-    local subcommands="cd pwd ls tree cat get find sync connect config py off shell-init help"
+    local subcommands="cd pwd ls tree cat get find sync connect config visual nav py help"
 
     # Find the subcommand (skip global flags)
     local subcmd=""
@@ -179,22 +104,16 @@ _zotcli() {
 
         config)
             COMPREPLY=($(compgen -W \
-                "ls.default_sort ls.sort_reverse get.default_format get.bib_style cache.ttl_seconds visual.enabled visual.show_sync_age prompt.mode prompt.color" \
+                "ls.default_sort ls.sort_reverse ls.default_fields get.default_format get.bib_style cache.ttl_seconds visual.auto visual.color visual.show_sync_age" \
                 -- "$cur"))
             ;;
 
-        shell-init)
-            case "$prev" in
-                --mode)
-                    COMPREPLY=($(compgen -W "session static off" -- "$cur"))
-                    ;;
-                --color)
-                    COMPREPLY=($(compgen -W "cyan green yellow red blue magenta white black bright_cyan bright_green bright_yellow bright_red bright_blue bright_magenta bright_white" -- "$cur"))
-                    ;;
-                *)
-                    COMPREPLY=($(compgen -W "--mode --color" -- "$cur"))
-                    ;;
-            esac
+        visual)
+            if [[ "$prev" == "--color" ]]; then
+                COMPREPLY=($(compgen -W "cyan green yellow red blue magenta white black bright_cyan bright_green bright_yellow bright_red bright_blue bright_magenta bright_white" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -W "--on --off --color" -- "$cur"))
+            fi
             ;;
 
         py)
@@ -207,6 +126,9 @@ _zotcli() {
 
     esac
 }
+
+# Completions can be disabled with: export ZOTCLI_COMPLETIONS=0
+[[ "${ZOTCLI_COMPLETIONS:-1}" == "0" ]] && return 0
 
 complete -F _zotcli zotcli
 complete -F _zotcli zot
