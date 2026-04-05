@@ -1,5 +1,14 @@
 # zotcli v3 — Implementation Plan
 
+## Status
+
+- [x] Implementado em 2026-04-05
+- [x] Branch de trabalho: `sigils-zotcli-v3` (`35890e8`)
+- [x] Consolidado no repositório em `sigils-zotcli-integration` (`6befa3d`)
+- [x] Escopo entregue:
+  contrato canônico com `^`, `off` funcional no shell wrapper, README/Makefile alinhados ao CLI real, `check` target, teste shell para hook/env, e spell reabilitado no workspace
+- [ ] Validação com credenciais reais do Zotero continua sendo a única lacuna não coberta por testes offline
+
 > Spell for the `sigils` repository.
 > Filesystem-like CLI for navigating and querying a Zotero library via `pyzotero`.
 > Works with or without Zotero Desktop (web API).
