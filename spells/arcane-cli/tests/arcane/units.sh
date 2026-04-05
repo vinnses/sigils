@@ -39,7 +39,7 @@ assert_contains() {
   local message="$3"
 
   TEST_COUNT=$((TEST_COUNT + 1))
-  if grep -Fq "$expected" <<<"$actual"; then
+  if grep -Fq -- "$expected" <<<"$actual"; then
     pass "$message"
   else
     printf '  expected output containing: %s\n' "$expected"
@@ -74,13 +74,28 @@ make_fixture() {
   FIXTURE_DIR="$(mktemp -d)"
   export FIXTURE_DIR
   export ARCANE_TEST_LOG="$FIXTURE_DIR/docker.log"
-  mkdir -p "$FIXTURE_DIR/fakebin" "$FIXTURE_DIR/arcane/testbox/web"
+  mkdir -p "$FIXTURE_DIR/fakebin" \
+           "$FIXTURE_DIR/arcane/testbox/web" \
+           "$FIXTURE_DIR/arcane/testbox/alpha" \
+           "$FIXTURE_DIR/arcane/testbox/beta"
   : >"$ARCANE_TEST_LOG"
 
   cat >"$FIXTURE_DIR/arcane/testbox/web/compose.yaml" <<'EOF'
 services:
   api:
     image: ghcr.io/example/web:latest
+EOF
+
+  cat >"$FIXTURE_DIR/arcane/testbox/alpha/compose.yaml" <<'EOF'
+services:
+  vibecode:
+    image: ghcr.io/example/alpha:latest
+EOF
+
+  cat >"$FIXTURE_DIR/arcane/testbox/beta/compose.yaml" <<'EOF'
+services:
+  vibecode:
+    image: ghcr.io/example/beta:latest
 EOF
 
   cat >"$FIXTURE_DIR/fakebin/docker" <<'EOF'
@@ -91,6 +106,12 @@ printf '%s|%s\n' "$PWD" "$*" >>"$ARCANE_TEST_LOG"
 
 case "$*" in
   "compose exec api echo hello")
+    exit 0
+    ;;
+  "compose exec api bash")
+    exit 0
+    ;;
+  "compose exec vibecode bash")
     exit 0
     ;;
   "compose ps -aq --all")
@@ -140,8 +161,25 @@ main() {
   assert_contains "$CMD_OUTPUT" "requires exactly one project and one service" "exec explains the missing service contract"
 
   run_cmd "$ARCANE_BIN" exec -d testbox web api echo hello
-  assert_status "$CMD_STATUS" "0" "exec accepts command arguments without a separator"
-  assert_contains "$(cat "$ARCANE_TEST_LOG")" "compose exec api echo hello" "exec forwards the service command without requiring '--'"
+  assert_status "$CMD_STATUS" "1" "exec requires the separator before the command"
+  assert_contains "$CMD_OUTPUT" "requires '--' before the command" "exec explains the separator requirement"
+
+  run_cmd "$ARCANE_BIN" exec -d testbox web api -- echo hello
+  assert_status "$CMD_STATUS" "0" "exec accepts command arguments with the separator"
+  assert_contains "$(cat "$ARCANE_TEST_LOG")" "compose exec api echo hello" "exec forwards the service command with '--'"
+
+  run_cmd "$ARCANE_BIN" bash -d testbox api
+  assert_status "$CMD_STATUS" "0" "bash resolves a unique service without requiring a project"
+  assert_contains "$(cat "$ARCANE_TEST_LOG")" "compose exec api bash" "bash runs an interactive shell in the resolved service"
+
+  run_cmd "$ARCANE_BIN" bash -d testbox vibecode
+  assert_status "$CMD_STATUS" "1" "bash rejects ambiguous service names"
+  assert_contains "$CMD_OUTPUT" "matches multiple projects" "bash explains the ambiguity"
+  assert_contains "$CMD_OUTPUT" "--project" "bash points to the project selector"
+
+  run_cmd "$ARCANE_BIN" bash -d testbox -p beta vibecode
+  assert_status "$CMD_STATUS" "0" "bash accepts an explicit project selector"
+  assert_contains "$(cat "$ARCANE_TEST_LOG")" "$FIXTURE_DIR/arcane/testbox/beta|compose exec vibecode bash" "bash targets the selected project"
 
   run_cmd "$ARCANE_BIN" path -d testbox web
   assert_status "$CMD_STATUS" "0" "path prints a project path"

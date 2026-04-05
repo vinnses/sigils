@@ -10,6 +10,7 @@ _arcane_usage() {
 Usage:
   arcane <subcommand> [projects...] [--exclude|-e excludes...] [--device|-d device]
   arcane exec [--device|-d device] <project> <service> -- <command...>
+  arcane bash [--device|-d device] [--project|-p project] <service>
   arcane rm <containers|images|networks|volumes|all> [projects...] [--exclude|-e excludes...] [--device|-d device]
 
 Subcommands:
@@ -24,6 +25,7 @@ Subcommands:
   cd         Shell helper when sourced; otherwise prints the project path
   path       Print the absolute path for one project
   exec       Run a command inside one project service
+  bash       Open bash in one service, resolving the project by service name when unique
   resources  Show containers, images, networks, and volumes tied to projects
   rm         Remove one resource type for the selected projects
   favorites  Generate one portable bookmarks HTML with nginx URLs grouped by device/project
@@ -113,6 +115,10 @@ case "${1:-}" in
     exec)
         shift
         _arcane_exec "$@"
+        ;;
+    bash)
+        shift
+        _arcane_bash "$@"
         ;;
     resources)
         shift
