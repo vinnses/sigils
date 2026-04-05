@@ -14,5 +14,12 @@ else
 fi
 
 export SPELL_DIR
+export MDVIEW_CALLER_CWD="${PWD}"
+
+if [[ -x "$PYTHON" ]]; then
+    cd "$SPELL_DIR" || exit 1
+    exec "$PYTHON" -m lib.commands "$@"
+fi
+
 cd "$SPELL_DIR" || exit 1
-exec "$PYTHON" -m lib.commands "$@"
+exec uv run python -m lib.commands "$@"

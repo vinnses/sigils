@@ -139,6 +139,10 @@ main() {
   assert_status "$CMD_STATUS" "1" "exec requires an explicit service argument"
   assert_contains "$CMD_OUTPUT" "requires exactly one project and one service" "exec explains the missing service contract"
 
+  run_cmd "$ARCANE_BIN" exec -d testbox web api echo hello
+  assert_status "$CMD_STATUS" "0" "exec accepts command arguments without a separator"
+  assert_contains "$(cat "$ARCANE_TEST_LOG")" "compose exec api echo hello" "exec forwards the service command without requiring '--'"
+
   run_cmd "$ARCANE_BIN" path -d testbox web
   assert_status "$CMD_STATUS" "0" "path prints a project path"
   assert_eq "$CMD_OUTPUT" "$FIXTURE_DIR/arcane/testbox/web" "path resolves the selected project"

@@ -64,6 +64,17 @@ def load_defaults() -> dict:
         return yaml.safe_load(handle) or {}
 
 
+def invocation_cwd() -> Path:
+    return Path(os.environ.get("MDVIEW_CALLER_CWD", os.getcwd()))
+
+
+def resolve_cli_target(raw_path: str) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (invocation_cwd() / candidate).resolve()
+
+
 def registry() -> Registry:
     return Registry(spell_dir() / "data")
 
@@ -102,7 +113,7 @@ def _resolve_port(args: argparse.Namespace, defaults: dict) -> int:
 
 def _resolve_app_state(args: argparse.Namespace) -> AppState:
     defaults = load_defaults()
-    target = Path(args.path).expanduser().resolve()
+    target = resolve_cli_target(args.path)
     if not target.exists():
         raise FileNotFoundError(target)
     return AppState.from_target(
@@ -123,7 +134,7 @@ def _python_executable() -> str:
 
 def _spawn_background(args: argparse.Namespace, app_state: AppState) -> int:
     log_path = log_dir() / f"mdview-{app_state.port}.log"
-    command = [_python_executable(), "-m", "lib.commands", "serve", str(Path(args.path).expanduser().resolve()), "--port", str(app_state.port)]
+    command = [_python_executable(), "-m", "lib.commands", "serve", str(resolve_cli_target(args.path)), "--port", str(app_state.port)]
     if args.theme:
         command.extend(["--theme", args.theme])
     if not app_state.watch:
@@ -132,6 +143,7 @@ def _spawn_background(args: argparse.Namespace, app_state: AppState) -> int:
     env = os.environ.copy()
     env["SPELL_DIR"] = str(spell_dir())
     env["MDVIEW_BACKGROUND_CHILD"] = "1"
+    env["MDVIEW_CALLER_CWD"] = str(invocation_cwd())
 
     with log_path.open("ab") as handle:
         process = subprocess.Popen(

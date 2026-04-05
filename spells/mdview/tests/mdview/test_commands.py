@@ -1,4 +1,5 @@
 from lib.commands import normalize_argv, parse_args
+from lib.commands import resolve_cli_target
 
 
 def test_alias_invocation_becomes_serve():
@@ -20,3 +21,13 @@ def test_background_is_only_valid_for_serve():
 def test_default_path_is_current_directory():
     args = parse_args(normalize_argv(["serve"]))
     assert args.path == "."
+
+
+def test_resolve_cli_target_uses_invocation_directory(tmp_path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    note = docs / "note.md"
+    note.write_text("# hi", encoding="utf-8")
+    monkeypatch.setenv("MDVIEW_CALLER_CWD", str(docs))
+    resolved = resolve_cli_target("note.md")
+    assert resolved == note.resolve()

@@ -330,7 +330,6 @@ _arcane_exec() {
     local device="$(hostname)"
     local positional=()
     local cmd=()
-    local split=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -340,7 +339,6 @@ _arcane_exec() {
                 shift 2
                 ;;
             --)
-                split=true
                 shift
                 cmd=("$@")
                 break
@@ -350,14 +348,18 @@ _arcane_exec() {
                 return 1
                 ;;
             *)
-                positional+=("$1")
-                shift
+                if [[ ${#positional[@]} -lt 2 ]]; then
+                    positional+=("$1")
+                    shift
+                else
+                    cmd=("$@")
+                    break
+                fi
                 ;;
         esac
     done
 
-    $split || { echo "error: exec requires '--' before the command" >&2; return 1; }
-    [[ ${#positional[@]} -eq 2 ]] || { echo "error: exec requires exactly one project and one service before '--'" >&2; return 1; }
+    [[ ${#positional[@]} -eq 2 ]] || { echo "error: exec requires exactly one project and one service before the command" >&2; return 1; }
     [[ ${#cmd[@]} -gt 0 ]] || { echo "error: exec requires a command after '--'" >&2; return 1; }
 
     ARCANE_DEVICE="$device"
