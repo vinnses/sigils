@@ -2,12 +2,12 @@
 navigator.py — path resolution and collection tree traversal.
 Pure functions, no state or I/O.
 
-Root URI: zot://
-Shortcuts: z://
+Root URI: ^
+Legacy shortcuts accepted: zot://, z://
 """
 
-ROOT = "zot://"
-_ROOT_PREFIXES = ("zot://", "z://")
+ROOT = "^"
+_ROOT_PREFIXES = ("^/", "^", "zot://", "z://")
 
 
 # ---------------------------------------------------------------------------
@@ -19,27 +19,35 @@ def _is_root(path):
 
 
 def _path_join(parent, name):
-    """Join a parent path with a new segment: zot:// + Books = zot://Books"""
+    """Join a parent path with a new segment: ^ + Books = ^/Books"""
     if _is_root(parent):
-        return ROOT + name
+        return ROOT + "/" + name
     return parent + "/" + name
 
 
 def _path_up(path):
     """
     Go one level up. Returns ROOT if already at top-level child.
-    e.g.  zot://Books/AI  →  zot://Books
-          zot://Books      →  zot://
+    e.g.  ^/Books/AI  →  ^/Books
+          ^/Books     →  ^
     """
-    suffix = path[len(ROOT):]   # everything after "zot://"
+    if _is_root(path):
+        return ROOT
+
+    suffix = path[len(ROOT):]
+    suffix = suffix[1:] if suffix.startswith("/") else suffix
     if "/" not in suffix:
         return ROOT
-    return path.rsplit("/", 1)[0]
+    return ROOT + "/" + suffix.rsplit("/", 1)[0]
 
 
 def _strip_root_prefix(path_string):
     """Return (is_absolute, rest) stripping any recognised root prefix."""
-    for prefix in _ROOT_PREFIXES:
+    if path_string == ROOT:
+        return True, ""
+    if path_string.startswith("^/"):
+        return True, path_string[2:]
+    for prefix in ("zot://", "z://"):
         if path_string == prefix:
             return True, ""
         if path_string.startswith(prefix):
@@ -82,7 +90,7 @@ def get_collection_by_key(collections, key):
 
 
 def build_path(collections, key):
-    """Build the full zot:// path string for a collection key."""
+    """Build the full ^ path string for a collection key."""
     if key is None:
         return ROOT
     parts = []
@@ -95,7 +103,7 @@ def build_path(collections, key):
         parts.append(data.get("name", cur))
         cur = data.get("parentCollection") or None
     parts.reverse()
-    return ROOT + "/".join(parts)
+    return ROOT + "/" + "/".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -113,15 +121,15 @@ def resolve_path(current_key, current_path, path_string, collections,
     Returns (collection_key, collection_path, new_item_key, new_item_label).
 
     Supported forms:
-      zot://          root (also: z://)
-      zot://foo/bar   absolute path (also: z://foo/bar)
+      ^               root (legacy: zot://, z://)
+      ^/foo/bar       absolute path
       foo             relative name in current level
       ..              parent (from item: back to collection)
       -               previous location
       .trash/.unfiled/.duplicates/.conflicts  virtual root nodes (conn required)
     """
     # Virtual node delegation — requires a DB connection
-    if conn is not None and path_string not in ("-", "", "^"):
+    if conn is not None and path_string not in ("-", "", "^", "zot://", "z://"):
         is_abs, rest = _strip_root_prefix(path_string)
         raw = rest if is_abs else path_string
         parts = [p for p in raw.split("/") if p]

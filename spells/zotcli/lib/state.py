@@ -12,7 +12,7 @@ SPELL_DIR = os.environ.get(
 )
 STATE_FILE = os.path.join(SPELL_DIR, "data", "state.json")
 
-ROOT = "zot://"
+ROOT = "^"
 
 _DEFAULT = {
     "collection_key": None,
@@ -76,7 +76,7 @@ def reset_state():
 
 
 def full_path(state):
-    """Return display path: 'zot://1.Books' or 'zot://1.Books/jurafsky2026'."""
+    """Return display path: '^/1.Books' or '^/1.Books/jurafsky2026'."""
     base = state.get("collection_path") or ROOT
     item_label = state.get("item_label")
     if item_label:

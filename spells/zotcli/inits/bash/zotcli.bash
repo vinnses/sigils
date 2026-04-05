@@ -16,6 +16,13 @@ zotcli() {
         return $?
     fi
 
+    if [[ "${1:-}" == "off" ]]; then
+        command zotcli off "${@:2}" >/dev/null
+        unset ZOTCLI_VISUAL ZOTCLI_PATH ZOTCLI_SYNC_AGE ZOTCLI_PROMPT_COLOR
+        __zotcli_remove_hook
+        return 0
+    fi
+
     # ZOTCLI_COLOR=1 forces ANSI codes even though stdout is a pipe
     local output exitcode
     output=$(ZOTCLI_COLOR=1 command zotcli "$@")
@@ -38,10 +45,32 @@ zotcli() {
         fi
     done <<< "$output"
 
+    if [[ -z "${ZOTCLI_VISUAL:-}" ]]; then
+        export ZOTCLI_VISUAL=1
+    fi
+    __zotcli_install_hook
+
     return $exitcode
 }
 
 zot() { zotcli "$@"; }
+
+__zotcli_install_hook() {
+    case ";${PROMPT_COMMAND:-};" in
+        *";__zotcli_prompt_apply;"*) ;;
+        "") PROMPT_COMMAND="__zotcli_prompt_apply" ;;
+        *) PROMPT_COMMAND="__zotcli_prompt_apply; ${PROMPT_COMMAND}" ;;
+    esac
+}
+
+__zotcli_remove_hook() {
+    local prompt=";${PROMPT_COMMAND:-};"
+    prompt="${prompt//;__zotcli_prompt_apply;/;}"
+    prompt="${prompt#;}"
+    prompt="${prompt%;}"
+    prompt="${prompt//;;/;}"
+    PROMPT_COMMAND="${prompt# }"
+}
 
 # ---------------------------------------------------------------------------
 # PS1 helper — returns info string when zotcli visual mode is active
@@ -70,7 +99,7 @@ __zotcli_ps1() {
     [[ "${ZOTCLI_VISUAL:-}" != "1" ]] && return
 
     local fmt="${1:-%s}"
-    local path="${ZOTCLI_PATH:-zot://}"
+    local path="${ZOTCLI_PATH:-^}"
     printf -- "$fmt" "$path"
 }
 
@@ -94,10 +123,10 @@ __zotcli_prompt_apply() {
 # Navigation mode — interactive loop where bare commands become zot commands
 #
 #   zot nav
-#   zot://0.Inbox > ls
-#   zot://0.Inbox > cd 1.Books
-#   zot://1.Books > cat jurafsky2026
-#   zot://1.Books > exit
+#   ^/0.Inbox > ls
+#   ^/0.Inbox > cd 1.Books
+#   ^/1.Books > cat jurafsky2026
+#   ^/1.Books > exit
 #
 # Known zot commands are intercepted. Anything else runs in normal shell.
 # Exit with 'exit', 'quit', or Ctrl+D.
@@ -116,7 +145,7 @@ __zotcli_nav() {
 
     local _cmd _args
     while true; do
-        local _path="${ZOTCLI_PATH:-zot://}"
+        local _path="${ZOTCLI_PATH:-^}"
         printf "${_cyan}%s${_nc} > " "$_path"
 
         if ! IFS= read -r -e _line; then
@@ -159,8 +188,4 @@ __zotcli_nav() {
     done
 }
 
-# Install hook (idempotent — no-op when ZOTCLI_VISUAL != 1)
-case ";${PROMPT_COMMAND:-};" in
-    *";__zotcli_prompt_apply;"*) ;;
-    *) PROMPT_COMMAND="${PROMPT_COMMAND:+${PROMPT_COMMAND}; }__zotcli_prompt_apply" ;;
-esac
+__zotcli_install_hook
