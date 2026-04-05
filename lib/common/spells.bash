@@ -28,6 +28,36 @@ sigils_spell_exists() {
     [[ -d "$SIGILS_ROOT/spells/$1" ]]
 }
 
+sigils_spell_dir() {
+    local spell="$1"
+    [[ -d "$SIGILS_ROOT/spells/$spell" ]] || return 1
+    printf '%s\n' "$SIGILS_ROOT/spells/$spell"
+}
+
+sigils_spell_supports_target() {
+    local spell="$1"
+    local target="$2"
+    local spell_dir
+    spell_dir="$(sigils_spell_dir "$spell")" || return 1
+    [[ -f "$spell_dir/Makefile" ]] || return 1
+    grep -Eq "^${target}:" "$spell_dir/Makefile"
+}
+
+sigils_spell_doc_path() {
+    local spell="$1"
+    local spell_dir
+    spell_dir="$(sigils_spell_dir "$spell")" || return 1
+
+    local candidate
+    for candidate in "$spell_dir"/*.1 "$spell_dir"/README.md "$spell_dir"/docs/*; do
+        [[ -f "$candidate" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+
+    return 1
+}
+
 sigils_write_disabled_file() {
     local values=("$@")
     mkdir -p "$(dirname "$SIGILS_DISABLED_FILE")"

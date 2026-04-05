@@ -10,7 +10,7 @@ help:
 	@echo "Sigils spells workspace"
 	@echo "Usage: make <target>"
 	@echo "  link | unlink | list | executable | new SPELL=<name>"
-	@echo "  test | check | fmt | clean"
+	@echo "  install | install-dev | test | check | fmt | clean [SPELL=<name>]"
 
 .PHONY: link
 link:
@@ -62,11 +62,23 @@ new:
 	@source "$(SPELL_HELPERS)"; sigils_enable_spell "$(SPELL)"
 	@$(MAKE) link
 
-.PHONY: test check fmt clean
-test check fmt clean:
+.PHONY: install install-dev test check fmt clean
+install install-dev test check fmt clean:
 	@target="$@"; \
-	for spell_dir in $(SPELLS_DIR)/*; do \
-		[ -d "$$spell_dir" ] || continue; \
+	source "$(SPELL_HELPERS)"; \
+	spell_dirs=(); \
+	if [[ -n "$(SPELL)" ]]; then \
+		if ! sigils_spell_exists "$(SPELL)"; then \
+			echo "ERROR: unknown spell: $(SPELL)"; \
+			exit 1; \
+		fi; \
+		spell_dirs+=("$(SPELLS_DIR)/$(SPELL)"); \
+	else \
+		while IFS=$$'\t' read -r _spell _status spell_dir; do \
+			spell_dirs+=("$$spell_dir"); \
+		done < <(sigils_iter_spells); \
+	fi; \
+	for spell_dir in "$${spell_dirs[@]}"; do \
 		if [ -f "$$spell_dir/Makefile" ]; then \
 			if grep -Eq "^$$target:" "$$spell_dir/Makefile"; then \
 				echo "--> $$target: $$(basename "$$spell_dir")"; \
