@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
-# arcane-batch core library
 
 set -euo pipefail
 
 readonly ARCANE_DIR="${ARCANE_DIR:-$HOME/arcane}"
 readonly ARCANE_IGNORED_DIRS="archived .data"
 
-# --- Colors ---
-
 _arcane_bold_cyan()  { printf '\033[1;36m%s\033[0m' "$*"; }
 _arcane_red()        { printf '\033[0;31m%s\033[0m' "$*"; }
 _arcane_green()      { printf '\033[0;32m%s\033[0m' "$*"; }
 
-# --- Arg parsing ---
+_arcane_search_regex() {
+    local pattern="$1"
+    shift
 
-# Sets: ARCANE_DEVICE, ARCANE_INCLUDES(), ARCANE_EXCLUDES()
+    if command -v rg >/dev/null 2>&1; then
+        rg -oN --no-filename "$pattern" "$@" 2>/dev/null || true
+    else
+        grep -RhoE "$pattern" "$@" 2>/dev/null || true
+    fi
+}
+
 _arcane_parse_args() {
     ARCANE_DEVICE="$(hostname)"
     ARCANE_INCLUDES=()
@@ -53,9 +58,6 @@ _arcane_parse_args() {
     fi
 }
 
-# --- Project discovery ---
-
-# Prints "name\tpath" lines for all projects in a device
 _arcane_discover() {
     local device="$1"
     local device_dir="$ARCANE_DIR/$device"
@@ -65,20 +67,18 @@ _arcane_discover() {
         return 1
     fi
 
-    # Device root project
     if [[ -f "$device_dir/compose.yaml" ]]; then
         printf '%s\t%s\n' "$device" "$device_dir"
     fi
 
-    # Subdirectory projects
     local entry
     for entry in "$device_dir"/*/; do
-        [[ ! -d "$entry" ]] && continue
+        [[ -d "$entry" ]] || continue
         local name
         name="$(basename "$entry")"
 
-        # Skip hidden dirs and ignored dirs
         [[ "$name" == .* ]] && continue
+
         local ignored=false
         local ign
         for ign in $ARCANE_IGNORED_DIRS; do
@@ -90,11 +90,10 @@ _arcane_discover() {
     done
 }
 
-# Prints "device\tpath" lines for all discovered devices
 _arcane_discover_devices() {
     local entry
     for entry in "$ARCANE_DIR"/*/; do
-        [[ ! -d "$entry" ]] && continue
+        [[ -d "$entry" ]] || continue
         local name
         name="$(basename "$entry")"
         [[ "$name" == .* ]] && continue
@@ -102,14 +101,36 @@ _arcane_discover_devices() {
     done
 }
 
-# --- Core iterator ---
+_arcane_filter_projects() {
+    local projects="$1"
+    local filtered=()
 
-_arcane_each() {
-    local action="$1"
-    shift
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" && -n "$path" ]] || continue
 
-    _arcane_parse_args "$@" || return 1
+        if [[ ${#ARCANE_INCLUDES[@]} -gt 0 ]]; then
+            local include_match=false
+            local inc
+            for inc in "${ARCANE_INCLUDES[@]}"; do
+                [[ "$name" == "$inc" ]] && { include_match=true; break; }
+            done
+            $include_match || continue
+        elif [[ ${#ARCANE_EXCLUDES[@]} -gt 0 ]]; then
+            local excluded=false
+            local exc
+            for exc in "${ARCANE_EXCLUDES[@]}"; do
+                [[ "$name" == "$exc" ]] && { excluded=true; break; }
+            done
+            $excluded && continue
+        fi
 
+        filtered+=("$name"$'\t'"$path")
+    done <<< "$projects"
+
+    printf '%s\n' "${filtered[@]}"
+}
+
+_arcane_selected_projects() {
     local projects
     projects="$(_arcane_discover "$ARCANE_DEVICE")" || return 1
 
@@ -118,138 +139,19 @@ _arcane_each() {
         return 1
     fi
 
-    # Apply filters
-    local filtered=()
-    while IFS=$'\t' read -r name path; do
-        if [[ ${#ARCANE_INCLUDES[@]} -gt 0 ]]; then
-            local found=false
-            local inc
-            for inc in "${ARCANE_INCLUDES[@]}"; do
-                [[ "$name" == "$inc" ]] && { found=true; break; }
-            done
-            $found || continue
-        elif [[ ${#ARCANE_EXCLUDES[@]} -gt 0 ]]; then
-            local excluded=false
-            local exc
-            for exc in "${ARCANE_EXCLUDES[@]}"; do
-                [[ "$name" == "$exc" ]] && { excluded=true; break; }
-            done
-            $excluded && continue
-        fi
-        filtered+=("$name"$'\t'"$path")
-    done <<< "$projects"
+    local filtered
+    filtered="$(_arcane_filter_projects "$projects")"
 
-    if [[ ${#filtered[@]} -eq 0 ]]; then
+    if [[ -z "$filtered" ]]; then
         echo "no projects matched the filter" >&2
         return 1
     fi
 
-    # Validate requested includes exist
-    if [[ ${#ARCANE_INCLUDES[@]} -gt 0 ]]; then
-        local inc
-        for inc in "${ARCANE_INCLUDES[@]}"; do
-            local found=false
-            local entry
-            for entry in "${filtered[@]}"; do
-                local ename="${entry%%$'\t'*}"
-                [[ "$ename" == "$inc" ]] && { found=true; break; }
-            done
-            if ! $found; then
-                echo "warning: project not found: $inc" >&2
-            fi
-        done
-    fi
-
-    local ok=0 fail=0
-    local entry
-    for entry in "${filtered[@]}"; do
-        local name="${entry%%$'\t'*}"
-        local path="${entry#*$'\t'}"
-
-        printf '%s %s\n' "$(_arcane_bold_cyan "$name")" "$action"
-        if (cd "$path" && eval "$action"); then
-            ((ok++))
-        else
-            printf '%s %s\n' "$(_arcane_red "$name")" "FAILED"
-            ((fail++))
-        fi
-    done
-
-    if [[ $((ok + fail)) -gt 1 ]]; then
-        echo ""
-        printf 'Done: %s ok, %s failed\n' "$(_arcane_green "$ok")" "$(_arcane_red "$fail")"
-    fi
-
-    [[ $fail -eq 0 ]]
+    printf '%s\n' "$filtered"
 }
 
-_arcane_project_status() {
-    local path="$1"
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "unknown"
-        return 0
-    fi
-    local ids
-    ids="$(cd "$path" && docker compose ps -q 2>/dev/null || true)"
-    if [[ -n "${ids//[[:space:]]/}" ]]; then
-        echo "up"
-    else
-        echo "down"
-    fi
-}
-
-_arcane_ls() {
-    local mode="${1:-all}"
-    shift || true
-
-    _arcane_parse_args "$@" || return 1
-
-    local projects
-    projects="$(_arcane_discover "$ARCANE_DEVICE")" || return 1
-    [[ -z "$projects" ]] && { echo "no projects found for device: $ARCANE_DEVICE" >&2; return 1; }
-
-    while IFS=$'\t' read -r name path; do
-        [[ -z "$name" || -z "$path" ]] && continue
-
-        if [[ ${#ARCANE_INCLUDES[@]} -gt 0 ]]; then
-            local found=false
-            local inc
-            for inc in "${ARCANE_INCLUDES[@]}"; do
-                [[ "$name" == "$inc" ]] && { found=true; break; }
-            done
-            $found || continue
-        elif [[ ${#ARCANE_EXCLUDES[@]} -gt 0 ]]; then
-            local excluded=false
-            local exc
-            for exc in "${ARCANE_EXCLUDES[@]}"; do
-                [[ "$name" == "$exc" ]] && { excluded=true; break; }
-            done
-            $excluded && continue
-        fi
-
-        local status
-        status="$(_arcane_project_status "$path")"
-        case "$mode" in
-            up) [[ "$status" == "up" ]] || continue ;;
-            down) [[ "$status" == "down" ]] || continue ;;
-        esac
-        printf '%-8s %s\n' "$status" "$name"
-    done <<< "$projects"
-}
-
-_arcane_cd() {
-    _arcane_parse_args "$@" || return 1
-
-    if [[ ${#ARCANE_EXCLUDES[@]} -gt 0 ]]; then
-        echo "error: arcane cd does not support --exclude" >&2
-        return 1
-    fi
-    if [[ ${#ARCANE_INCLUDES[@]} -ne 1 ]]; then
-        echo "error: arcane cd requires exactly one project name" >&2
-        return 1
-    fi
-
-    local project="${ARCANE_INCLUDES[0]}"
+_arcane_resolve_project() {
+    local project="$1"
     local projects
     projects="$(_arcane_discover "$ARCANE_DEVICE")" || return 1
 
@@ -261,6 +163,271 @@ _arcane_cd() {
 
     echo "error: project not found on device '$ARCANE_DEVICE': $project" >&2
     return 1
+}
+
+_arcane_project_status() {
+    local path="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "unknown"
+        return 0
+    fi
+
+    local ids
+    ids="$(cd "$path" && docker compose ps -q 2>/dev/null || true)"
+    if [[ -n "${ids//[[:space:]]/}" ]]; then
+        echo "up"
+    else
+        echo "down"
+    fi
+}
+
+_arcane_project_name_from_path() {
+    basename "$1"
+}
+
+_arcane_project_containers() {
+    local path="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+    (cd "$path" && docker compose ps -aq --all 2>/dev/null || true) | awk 'NF'
+}
+
+_arcane_project_images() {
+    local path="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+    (cd "$path" && docker compose config --images 2>/dev/null || true) | awk 'NF' | sort -u
+}
+
+_arcane_project_networks() {
+    local path="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local project_name
+    project_name="$(_arcane_project_name_from_path "$path")"
+    docker network ls --filter "label=com.docker.compose.project=${project_name}" --format '{{.Name}}' 2>/dev/null | awk 'NF'
+}
+
+_arcane_project_volumes() {
+    local path="$1"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local project_name
+    project_name="$(_arcane_project_name_from_path "$path")"
+    docker volume ls --filter "label=com.docker.compose.project=${project_name}" --format '{{.Name}}' 2>/dev/null | awk 'NF'
+}
+
+_arcane_join_lines() {
+    local lines=("$@")
+    if [[ ${#lines[@]} -eq 0 ]]; then
+        printf '-\n'
+    else
+        printf '%s\n' "${lines[*]}"
+    fi
+}
+
+_arcane_remove_named_resources() {
+    local kind="$1"
+    shift
+    local items=("$@")
+
+    [[ ${#items[@]} -gt 0 ]] || return 0
+
+    case "$kind" in
+        containers)
+            docker rm -f "${items[@]}"
+            ;;
+        images)
+            docker image rm -f "${items[@]}"
+            ;;
+        networks)
+            docker network rm "${items[@]}"
+            ;;
+        volumes)
+            docker volume rm "${items[@]}"
+            ;;
+        *)
+            echo "error: unknown resource type: $kind" >&2
+            return 1
+            ;;
+    esac
+}
+
+_arcane_each() {
+    local action="$1"
+    shift
+
+    _arcane_parse_args "$@" || return 1
+
+    local filtered
+    filtered="$(_arcane_selected_projects)" || return 1
+
+    local ok=0
+    local fail=0
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" && -n "$path" ]] || continue
+
+        printf '%s %s\n' "$(_arcane_bold_cyan "$name")" "$action"
+        if (cd "$path" && eval "$action"); then
+            ((ok += 1))
+        else
+            printf '%s %s\n' "$(_arcane_red "$name")" "FAILED"
+            ((fail += 1))
+        fi
+    done <<< "$filtered"
+
+    if [[ $((ok + fail)) -gt 1 ]]; then
+        echo
+        printf 'Done: %s ok, %s failed\n' "$(_arcane_green "$ok")" "$(_arcane_red "$fail")"
+    fi
+
+    [[ $fail -eq 0 ]]
+}
+
+_arcane_ls() {
+    local mode="${1:-all}"
+    shift || true
+
+    _arcane_parse_args "$@" || return 1
+
+    local filtered
+    filtered="$(_arcane_selected_projects)" || return 1
+
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" && -n "$path" ]] || continue
+        local status
+        status="$(_arcane_project_status "$path")"
+        case "$mode" in
+            up) [[ "$status" == "up" ]] || continue ;;
+            down) [[ "$status" == "down" ]] || continue ;;
+        esac
+        printf '%-8s %s\n' "$status" "$name"
+    done <<< "$filtered"
+}
+
+_arcane_path() {
+    _arcane_parse_args "$@" || return 1
+
+    if [[ ${#ARCANE_EXCLUDES[@]} -gt 0 ]]; then
+        echo "error: arcane path does not support --exclude" >&2
+        return 1
+    fi
+    if [[ ${#ARCANE_INCLUDES[@]} -ne 1 ]]; then
+        echo "error: arcane path requires exactly one project name" >&2
+        return 1
+    fi
+
+    _arcane_resolve_project "${ARCANE_INCLUDES[0]}"
+}
+
+_arcane_exec() {
+    local device="$(hostname)"
+    local positional=()
+    local cmd=()
+    local split=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --device|-d)
+                [[ $# -lt 2 ]] && { echo "error: --device requires a value" >&2; return 1; }
+                device="$2"
+                shift 2
+                ;;
+            --)
+                split=true
+                shift
+                cmd=("$@")
+                break
+                ;;
+            -*)
+                echo "error: unknown option: $1" >&2
+                return 1
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    $split || { echo "error: exec requires '--' before the command" >&2; return 1; }
+    [[ ${#positional[@]} -eq 2 ]] || { echo "error: exec requires exactly one project and one service before '--'" >&2; return 1; }
+    [[ ${#cmd[@]} -gt 0 ]] || { echo "error: exec requires a command after '--'" >&2; return 1; }
+
+    ARCANE_DEVICE="$device"
+    local path
+    path="$(_arcane_resolve_project "${positional[0]}")" || return 1
+
+    (cd "$path" && docker compose exec "${positional[1]}" "${cmd[@]}")
+}
+
+_arcane_resources() {
+    _arcane_parse_args "$@" || return 1
+
+    local filtered
+    filtered="$(_arcane_selected_projects)" || return 1
+
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" && -n "$path" ]] || continue
+
+        mapfile -t containers < <(_arcane_project_containers "$path")
+        mapfile -t images < <(_arcane_project_images "$path")
+        mapfile -t networks < <(_arcane_project_networks "$path")
+        mapfile -t volumes < <(_arcane_project_volumes "$path")
+
+        printf '%s (%s)\n' "$name" "$path"
+        printf '  containers: %s\n' "$(_arcane_join_lines "${containers[@]}")"
+        printf '  images: %s\n' "$(_arcane_join_lines "${images[@]}")"
+        printf '  networks: %s\n' "$(_arcane_join_lines "${networks[@]}")"
+        printf '  volumes: %s\n' "$(_arcane_join_lines "${volumes[@]}")"
+    done <<< "$filtered"
+}
+
+_arcane_rm() {
+    local resource_type="$1"
+    shift
+
+    case "$resource_type" in
+        containers|images|networks|volumes|all) ;;
+        *)
+            echo "error: rm supports containers, images, networks, volumes, or all" >&2
+            return 1
+            ;;
+    esac
+
+    _arcane_parse_args "$@" || return 1
+
+    local filtered
+    filtered="$(_arcane_selected_projects)" || return 1
+
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" && -n "$path" ]] || continue
+
+        printf '%s remove %s\n' "$(_arcane_bold_cyan "$name")" "$resource_type"
+
+        if [[ "$resource_type" == "containers" || "$resource_type" == "all" ]]; then
+            mapfile -t containers < <(_arcane_project_containers "$path")
+            _arcane_remove_named_resources containers "${containers[@]}"
+        fi
+        if [[ "$resource_type" == "images" || "$resource_type" == "all" ]]; then
+            mapfile -t images < <(_arcane_project_images "$path")
+            _arcane_remove_named_resources images "${images[@]}"
+        fi
+        if [[ "$resource_type" == "networks" || "$resource_type" == "all" ]]; then
+            mapfile -t networks < <(_arcane_project_networks "$path")
+            _arcane_remove_named_resources networks "${networks[@]}"
+        fi
+        if [[ "$resource_type" == "volumes" || "$resource_type" == "all" ]]; then
+            mapfile -t volumes < <(_arcane_project_volumes "$path")
+            _arcane_remove_named_resources volumes "${volumes[@]}"
+        fi
+    done <<< "$filtered"
 }
 
 _arcane_html_escape() {
@@ -275,15 +442,13 @@ _arcane_html_escape() {
 _arcane_collect_nginx_urls() {
     local project_path="$1"
 
-    # 1) Explicit URLs in compose/env/nginx-related files
     local file
     while IFS= read -r -d '' file; do
-        rg -oN --no-filename 'https?://[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]+' "$file" || true
+        _arcane_search_regex 'https?://[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]+' "$file"
     done < <(find "$project_path" -maxdepth 5 -type f \
         \( -name 'compose.yaml' -o -name 'compose.yml' -o -name '*.conf' -o -name '.env' -o -name '.env.*' -o -name '*.env' \) \
         -print0)
 
-    # 2) nginx server_name directives -> infer http URLs
     while IFS= read -r line; do
         line="${line#server_name }"
         line="${line%;}"
@@ -293,13 +458,12 @@ _arcane_collect_nginx_urls() {
             [[ "$host" =~ [*] ]] && continue
             printf 'http://%s\n' "$host"
         done
-    done < <(rg -oN --no-filename 'server_name[[:space:]]+[^;]+;' "$project_path" || true)
+    done < <(_arcane_search_regex 'server_name[[:space:]]+[^;]+;' "$project_path")
 
-    # 3) Traefik Host(`domain`) labels
     while IFS= read -r host; do
         [[ -z "$host" || "$host" == "localhost" ]] && continue
         printf 'http://%s\n' "$host"
-    done < <(rg -oN --no-filename 'Host\(`[^`]+`\)' "$project_path" | sed -E 's/Host\(`([^`]+)`\)/\1/' || true)
+    done < <(_arcane_search_regex 'Host\(`[^`]+`\)' "$project_path" | sed -E 's/Host\(`([^`]+)`\)/\1/')
 }
 
 _arcane_write_bookmark_entry() {
@@ -360,7 +524,7 @@ _arcane_favorites() {
         echo '<DL><p>'
         echo '<DT><H3>arcane</H3>'
         echo '<DL><p>'
-    } > "$output"
+    } >"$output"
 
     local total=0
     local device
@@ -372,39 +536,37 @@ _arcane_favorites() {
         {
             printf '<DT><H3>%s</H3>\n' "$(_arcane_html_escape "$device")"
             echo '<DL><p>'
-        } >> "$output"
+        } >>"$output"
 
         while IFS=$'\t' read -r project path; do
-            [[ -z "$project" || -z "$path" ]] && continue
+            [[ -n "$project" && -n "$path" ]] || continue
             mapfile -t urls < <(_arcane_collect_nginx_urls "$path" | awk 'NF' | sort -u)
-            [[ ${#urls[@]} -eq 0 ]] && continue
+            [[ ${#urls[@]} -gt 0 ]] || continue
 
             {
                 printf '<DT><H3>%s</H3>\n' "$(_arcane_html_escape "$project")"
                 echo '<DL><p>'
-            } >> "$output"
+            } >>"$output"
 
             local url
             for url in "${urls[@]}"; do
-                _arcane_write_bookmark_entry "$url" "$url" >> "$output"
-                ((total++))
+                _arcane_write_bookmark_entry "$url" "$url" >>"$output"
+                ((total += 1))
             done
 
-            echo '</DL><p>' >> "$output"
+            echo '</DL><p>' >>"$output"
         done <<< "$projects"
 
-        echo '</DL><p>' >> "$output"
+        echo '</DL><p>' >>"$output"
     done
 
     {
         echo '</DL><p>'
         echo '</DL><p>'
-    } >> "$output"
+    } >>"$output"
 
     echo "Bookmarks generated: $output ($total URL(s))"
 }
-
-# --- Dump ---
 
 _arcane_dump() {
     if ! command -v 7z >/dev/null 2>&1; then
@@ -416,7 +578,6 @@ _arcane_dump() {
     stamp="$(date +%Y-%m-%d)"
     local output="$ARCANE_DIR/arcane-env-dump-${stamp}.7z"
 
-    # Collect .env files
     local env_files=()
     while IFS= read -r -d '' f; do
         env_files+=("$f")
@@ -437,7 +598,6 @@ _arcane_dump() {
         echo "  ${f#"$ARCANE_DIR/"}"
     done
 
-    # Build relative path list
     local rel_paths=()
     for f in "${env_files[@]}"; do
         rel_paths+=("${f#"$ARCANE_DIR/"}")
@@ -445,24 +605,21 @@ _arcane_dump() {
 
     (cd "$ARCANE_DIR" && 7z a -p -mhe=on "$output" "${rel_paths[@]}")
 
-    echo ""
+    echo
     echo "Archive: $output"
 
-    # Ensure gitignore entry
     local gitignore="$ARCANE_DIR/.gitignore"
     local pattern="arcane-env-dump-*.7z"
     if [[ -f "$gitignore" ]]; then
         if ! grep -qF "$pattern" "$gitignore"; then
-            echo "$pattern" >> "$gitignore"
+            echo "$pattern" >>"$gitignore"
             echo "Added $pattern to .gitignore"
         fi
     else
-        echo "$pattern" > "$gitignore"
+        echo "$pattern" >"$gitignore"
         echo "Created .gitignore with $pattern"
     fi
 }
-
-# --- Restore ---
 
 _arcane_restore() {
     local archive="$1"
@@ -481,13 +638,11 @@ _arcane_restore() {
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT
 
-    # Extract to temp dir to preview
     if ! 7z x -o"$tmpdir" "$archive"; then
         echo "error: failed to extract archive" >&2
         return 1
     fi
 
-    # List files and check for overwrites
     local env_files=()
     while IFS= read -r -d '' f; do
         env_files+=("$f")
@@ -513,7 +668,7 @@ _arcane_restore() {
     done
 
     if $has_overwrites; then
-        echo ""
+        echo
         read -r -p "Some files will be overwritten. Continue? [y/N] " confirm
         case "$confirm" in
             [yY]|[yY][eE][sS]) ;;
@@ -524,7 +679,6 @@ _arcane_restore() {
         esac
     fi
 
-    # Copy files to target
     for f in "${env_files[@]}"; do
         local rel="${f#"$tmpdir/"}"
         local target="$ARCANE_DIR/$rel"

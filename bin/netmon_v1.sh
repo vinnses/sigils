@@ -1,1 +1,0 @@
-../spells/netmon/bin/netmon_v1.sh

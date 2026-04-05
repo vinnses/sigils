@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# arcane — batch Docker Compose operations across the arcane repository
 
 set -euo pipefail
 
@@ -8,23 +7,33 @@ source "${SPELL_DIR}/lib/core.bash"
 
 _arcane_usage() {
     cat <<'EOF'
-Usage: arcane <subcommand> [projects...] [--exclude|-e excludes...] [--device|-d device]
+Usage:
+  arcane <subcommand> [projects...] [--exclude|-e excludes...] [--device|-d device]
+  arcane exec [--device|-d device] <project> <service> -- <command...>
+  arcane rm <containers|images|networks|volumes|all> [projects...] [--exclude|-e excludes...] [--device|-d device]
 
 Subcommands:
-  up        Start services (docker compose up -d)
-  down      Stop services (docker compose down)
-  pull      Pull images and restart (pull + up -d)
-  restart   Full restart (down + pull + up -d)
-  clean     Remove services and images (down --rmi all)
-  purge     Clean + remove volumes (down --rmi all --volumes)
-  status    Show service status (docker compose ps)
-  ls        List projects on device (optionally only up or down)
-  cd        Print absolute project path (use with: cd "$(arcane cd <project>)")
-  run       Run an arbitrary command in each selected project
-  exec      Alias for run
-  favorites Generate one portable bookmarks HTML with nginx URLs grouped by device/project
-  dump      Backup all .env files to encrypted 7z archive
-  restore   Restore .env files from 7z archive
+  up         Start services (docker compose up -d)
+  down       Stop services (docker compose down)
+  pull       Pull images and restart (pull + up -d)
+  restart    Full restart (down + pull + up -d)
+  clean      Legacy cleanup shortcut (down --rmi all)
+  purge      Legacy cleanup shortcut with volumes (down --rmi all --volumes)
+  status     Show service status (docker compose ps)
+  ls         List projects on device (optionally only up or down)
+  cd         Shell helper when sourced; otherwise prints the project path
+  path       Print the absolute path for one project
+  exec       Run a command inside one project service
+  resources  Show containers, images, networks, and volumes tied to projects
+  rm         Remove one resource type for the selected projects
+  favorites  Generate one portable bookmarks HTML with nginx URLs grouped by device/project
+  dump       Backup all .env files to encrypted 7z archive
+  restore    Restore .env files from 7z archive
+
+Notes:
+  - 'run' has been removed. Use lifecycle commands for project-wide actions.
+  - For shell navigation, source init/env.bash and use: arcane cd <project>
+  - Non-interactive path lookup remains available via: arcane path <project>
 
 Options:
   -d, --device <name>     Target device (default: hostname)
@@ -88,7 +97,7 @@ case "${1:-}" in
                 *)
                     ls_args+=("$1")
                     shift
-                ;;
+                    ;;
             esac
         done
         if $seen_up && $seen_down; then
@@ -97,38 +106,28 @@ case "${1:-}" in
         fi
         _arcane_ls "$ls_mode" "${ls_args[@]}"
         ;;
-    cd)
+    cd|path)
         shift
-        _arcane_cd "$@"
+        _arcane_path "$@"
         ;;
-    run|exec)
+    exec)
         shift
-        if [[ $# -eq 0 ]]; then
-            echo "error: run/exec requires a command. Use: arcane run [filters...] -- <command>" >&2
-            exit 1
-        fi
-
-        args=("$@")
-        split=-1
-        for i in "${!args[@]}"; do
-            if [[ "${args[$i]}" == "--" ]]; then
-                split="$i"
-                break
-            fi
-        done
-
-        if [[ "$split" -lt 0 ]]; then
-            echo "error: missing '--' separator. Example: arcane run -d $(hostname) -- docker compose config" >&2
-            exit 1
-        fi
-
-        filters=("${args[@]:0:split}")
-        cmd=("${args[@]:split+1}")
-        if [[ ${#cmd[@]} -eq 0 ]]; then
-            echo "error: missing command after '--'" >&2
-            exit 1
-        fi
-        _arcane_each "${cmd[*]}" "${filters[@]}"
+        _arcane_exec "$@"
+        ;;
+    resources)
+        shift
+        _arcane_resources "$@"
+        ;;
+    rm)
+        shift
+        [[ $# -gt 0 ]] || { echo "error: rm requires a resource type" >&2; exit 1; }
+        resource_type="$1"
+        shift
+        _arcane_rm "$resource_type" "$@"
+        ;;
+    run)
+        echo "error: run has been removed. Use 'arcane exec <project> <service> -- <command...>' or a lifecycle subcommand." >&2
+        exit 1
         ;;
     favorites)
         shift

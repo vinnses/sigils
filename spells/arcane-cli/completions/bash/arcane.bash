@@ -1,5 +1,4 @@
 #!/bin/bash
-# arcane bash completion
 
 _arcane() {
     local cur prev words cword
@@ -10,9 +9,8 @@ _arcane() {
     cword=$COMP_CWORD
 
     local arcane_dir="${ARCANE_DIR:-$HOME/arcane}"
-    local subcommands="up down pull restart clean status dump restore"
+    local subcommands="up down pull restart clean purge status ls cd path exec resources rm favorites dump restore"
 
-    # Complete subcommand at position 1
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$subcommands --help" -- "$cur"))
         return 0
@@ -20,22 +18,17 @@ _arcane() {
 
     local subcmd="${words[1]}"
 
-    # dump and restore have special completion
-    if [[ "$subcmd" == "dump" ]]; then
-        return 0
-    fi
     if [[ "$subcmd" == "restore" ]]; then
         COMPREPLY=($(compgen -f -- "$cur"))
         return 0
     fi
 
-    # After --device/-d: complete device names
     if [[ "$prev" == "--device" || "$prev" == "-d" ]]; then
         local devices=()
         if [[ -d "$arcane_dir" ]]; then
             local d
             for d in "$arcane_dir"/*/; do
-                [[ ! -d "$d" ]] && continue
+                [[ -d "$d" ]] || continue
                 local name
                 name="$(basename "$d")"
                 [[ "$name" == "archived" || "$name" == .* ]] && continue
@@ -46,20 +39,18 @@ _arcane() {
         return 0
     fi
 
-    # Determine current device for project completion
     local device
     device="$(hostname)"
     local i
-    for ((i=2; i<cword; i++)); do
+    for ((i = 2; i < cword; i++)); do
         if [[ "${words[i]}" == "--device" || "${words[i]}" == "-d" ]]; then
-            if [[ $((i+1)) -lt ${#words[@]} ]]; then
+            if [[ $((i + 1)) -lt ${#words[@]} ]]; then
                 device="${words[i+1]}"
             fi
             break
         fi
     done
 
-    # Collect project names
     local device_dir="$arcane_dir/$device"
     local projects=()
     if [[ -d "$device_dir" ]]; then
@@ -68,7 +59,7 @@ _arcane() {
         fi
         local entry
         for entry in "$device_dir"/*/; do
-            [[ ! -d "$entry" ]] && continue
+            [[ -d "$entry" ]] || continue
             local name
             name="$(basename "$entry")"
             [[ "$name" == "archived" || "$name" == .* || "$name" == ".data" ]] && continue
@@ -76,23 +67,44 @@ _arcane() {
         done
     fi
 
-    # After --exclude/-e: complete project names
-    local in_exclude=false
-    for ((i=2; i<cword; i++)); do
-        if [[ "${words[i]}" == "--exclude" || "${words[i]}" == "-e" ]]; then
-            in_exclude=true
-            break
-        fi
-    done
+    case "$subcmd" in
+        exec)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--device -d" -- "$cur"))
+                return 0
+            fi
+            for ((i = 2; i < cword; i++)); do
+                [[ "${words[i]}" == "--" ]] && return 0
+            done
+            COMPREPLY=($(compgen -W "${projects[*]} --device -d --" -- "$cur"))
+            return 0
+            ;;
+        rm)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "containers images networks volumes all" -- "$cur"))
+                return 0
+            fi
+            COMPREPLY=($(compgen -W "${projects[*]} --exclude --device -e -d" -- "$cur"))
+            return 0
+            ;;
+        ls)
+            COMPREPLY=($(compgen -W "${projects[*]} --exclude --device -e -d --up --down" -- "$cur"))
+            return 0
+            ;;
+        cd|path|resources|up|down|pull|restart|clean|purge|status)
+            COMPREPLY=($(compgen -W "${projects[*]} --exclude --device -e -d" -- "$cur"))
+            return 0
+            ;;
+        favorites)
+            COMPREPLY=($(compgen -W "--device -d --output -o" -- "$cur"))
+            return 0
+            ;;
+        dump)
+            return 0
+            ;;
+    esac
 
-    if $in_exclude || [[ "$prev" == "--exclude" || "$prev" == "-e" ]]; then
-        COMPREPLY=($(compgen -W "${projects[*]}" -- "$cur"))
-        return 0
-    fi
-
-    # Default: complete project names + options
-    COMPREPLY=($(compgen -W "${projects[*]} --exclude --device -e -d" -- "$cur"))
-    return 0
+    COMPREPLY=($(compgen -W "$subcommands --help" -- "$cur"))
 }
 
 complete -F _arcane arcane
