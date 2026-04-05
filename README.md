@@ -38,13 +38,16 @@ Feature-oriented shell tooling workspace.
 Source `init/env.bash` from your shell startup file. It:
 
 - prepends root `bin/` to `PATH`
-- loads bash completions from `spells/*/completions/bash/*.bash`
+- loads bash init/completion files only for enabled spells
+
+Enabled and disabled spells are controlled by `config/spells.disabled`.
+Use `sigils list`, `sigils enable <spell>`, and `sigils disable <spell>` to manage that state.
 
 ## Make targets
 
-- `make link`: create/update symlinks in root `bin/`
+- `make link`: recreate symlinks in root `bin/` for enabled spells only
 - `make unlink`: remove only symlinks from root `bin/`
-- `make list`: list spells and detected entrypoints
+- `make list`: list spells, status, and detected entrypoints
 - `make executable`: ensure `spells/*/bin/*` are executable
 - `make new SPELL=<name>`: generate a full spell scaffold and run `make link`
 - `make test`, `make check`, `make fmt`, `make clean`: delegate to spell Makefiles when available

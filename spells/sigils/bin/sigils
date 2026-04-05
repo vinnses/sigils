@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "$SPELL_DIR/../../lib/common/spells.bash"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  sigils list
+  sigils enable <spell>
+  sigils disable <spell>
+  sigils new <spell>
+EOF
+}
+
+require_spell() {
+    local spell="$1"
+    if ! sigils_spell_exists "$spell"; then
+        echo "error: unknown spell: $spell" >&2
+        exit 1
+    fi
+}
+
+case "${1:-}" in
+    list)
+        while IFS=$'\t' read -r spell status _spell_dir; do
+            printf '%s %s\n' "$status" "$spell"
+        done < <(sigils_iter_spells)
+        ;;
+    enable)
+        [[ $# -eq 2 ]] || { echo "error: enable requires a spell name" >&2; exit 1; }
+        require_spell "$2"
+        sigils_enable_spell "$2"
+        ;;
+    disable)
+        [[ $# -eq 2 ]] || { echo "error: disable requires a spell name" >&2; exit 1; }
+        require_spell "$2"
+        sigils_disable_spell "$2"
+        ;;
+    new)
+        [[ $# -eq 2 ]] || { echo "error: new requires a spell name" >&2; exit 1; }
+        make -C "$SIGILS_ROOT" new SPELL="$2"
+        ;;
+    --help|-h|help|"")
+        usage
+        [[ $# -gt 0 ]] || exit 1
+        ;;
+    *)
+        echo "error: unknown subcommand: $1" >&2
+        usage
+        exit 1
+        ;;
+esac

@@ -3,6 +3,7 @@ SHELL := /bin/bash
 
 SPELLS_DIR := spells
 ROOT_BIN := bin
+SPELL_HELPERS := lib/common/spells.bash
 
 .PHONY: help
 help:
@@ -14,34 +15,35 @@ help:
 .PHONY: link
 link:
 	@mkdir -p "$(ROOT_BIN)"
-	@shopt -s nullglob; \
-	for cmd in $(SPELLS_DIR)/*/bin/*; do \
-		if [ -f "$$cmd" ] && [ -x "$$cmd" ]; then \
-			name="$$(basename "$$cmd")"; \
-			rel_target="../$$cmd"; \
-			if [ -L "$(ROOT_BIN)/$$name" ] && [ "$$(readlink "$(ROOT_BIN)/$$name")" = "$$rel_target" ]; then \
-				:; \
-			else \
+	@find "$(ROOT_BIN)" -mindepth 1 -maxdepth 1 -type l -delete
+	@source "$(SPELL_HELPERS)"; \
+	while IFS=$$'\t' read -r spell spell_dir; do \
+		for cmd in "$$spell_dir"/bin/*; do \
+			if [ -f "$$cmd" ] && [ -x "$$cmd" ]; then \
+				name="$$(basename "$$cmd")"; \
+				rel_target="../$${cmd#$(CURDIR)/}"; \
 				ln -sfn "$$rel_target" "$(ROOT_BIN)/$$name"; \
 			fi; \
-		fi; \
-	done
+		done; \
+	done < <(sigils_iter_enabled_spells)
 
 .PHONY: unlink
 unlink:
 	@mkdir -p "$(ROOT_BIN)"
-	@for f in $(ROOT_BIN)/*; do [ -L "$$f" ] && rm -f "$$f" || true; done
+	@find "$(ROOT_BIN)" -mindepth 1 -maxdepth 1 -type l -delete
 
 .PHONY: list
 list:
-	@shopt -s nullglob; \
-	for spell_dir in $(SPELLS_DIR)/*; do \
-		[ -d "$$spell_dir" ] || continue; \
-		spell="$$(basename "$$spell_dir")"; \
+	@source "$(SPELL_HELPERS)"; \
+	while IFS=$$'\t' read -r spell status spell_dir; do \
 		entries=(); \
 		for cmd in "$$spell_dir"/bin/*; do [ -f "$$cmd" ] && entries+=("$$(basename "$$cmd")"); done; \
-		if [ $${#entries[@]} -eq 0 ]; then echo "$$spell: (no entrypoints)"; else echo "$$spell: $${entries[*]}"; fi; \
-	done
+		if [ $${#entries[@]} -eq 0 ]; then \
+			echo "$$status $$spell: (no entrypoints)"; \
+		else \
+			echo "$$status $$spell: $${entries[*]}"; \
+		fi; \
+	done < <(sigils_iter_spells)
 
 .PHONY: executable
 executable:
@@ -56,7 +58,8 @@ new:
 		"$(SPELLS_DIR)/$(SPELL)/completions/zsh/.gitkeep" "$(SPELLS_DIR)/$(SPELL)/completions/fish/.gitkeep" \
 		"$(SPELLS_DIR)/$(SPELL)/desktop/.gitkeep"
 	@[ -f "$(SPELLS_DIR)/$(SPELL)/README.md" ] || printf '# %s\n\nSpell scaffold for actions, binaries, configs, docs, tests, services, and completions.\n' "$(SPELL)" > "$(SPELLS_DIR)/$(SPELL)/README.md"
-	@[ -f "$(SPELLS_DIR)/$(SPELL)/Makefile" ] || printf '.PHONY: test check fmt clean\n\ntest:\n\t@echo "[skip] no spell-local tests configured"\n\ncheck:\n\t@echo "[skip] no spell-local checks configured"\n\nfmt:\n\t@echo "[skip] no spell-local formatting configured"\n\nclean:\n\t@echo "[skip] no spell-local cleanup configured"\n' > "$(SPELLS_DIR)/$(SPELL)/Makefile"
+	@[ -f "$(SPELLS_DIR)/$(SPELL)/Makefile" ] || printf 'SHELL := /bin/bash\n\n.PHONY: test check fmt clean\n\ntest:\n\t@echo "[skip] no spell-local tests configured"\n\ncheck:\n\t@echo "[skip] no spell-local checks configured"\n\nfmt:\n\t@echo "[skip] no spell-local formatting configured"\n\nclean:\n\t@echo "[skip] no spell-local cleanup configured"\n' > "$(SPELLS_DIR)/$(SPELL)/Makefile"
+	@source "$(SPELL_HELPERS)"; sigils_enable_spell "$(SPELL)"
 	@$(MAKE) link
 
 .PHONY: test check fmt clean
@@ -65,7 +68,7 @@ test check fmt clean:
 	for spell_dir in $(SPELLS_DIR)/*; do \
 		[ -d "$$spell_dir" ] || continue; \
 		if [ -f "$$spell_dir/Makefile" ]; then \
-			if rg -n "^$$target:" "$$spell_dir/Makefile" >/dev/null; then \
+			if grep -Eq "^$$target:" "$$spell_dir/Makefile"; then \
 				echo "--> $$target: $$(basename "$$spell_dir")"; \
 				$(MAKE) -C "$$spell_dir" "$$target"; \
 			else \
