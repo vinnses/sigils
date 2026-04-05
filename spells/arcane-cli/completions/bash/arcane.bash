@@ -9,7 +9,7 @@ _arcane() {
     cword=$COMP_CWORD
 
     local arcane_dir="${ARCANE_DIR:-$HOME/arcane}"
-    local subcommands="up down pull restart clean purge status ls cd path exec resources rm favorites dump restore"
+    local subcommands="up down pull restart clean purge status ls cd path exec bash resources rm favorites dump restore"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$subcommands --help" -- "$cur"))
@@ -67,6 +67,33 @@ _arcane() {
         done
     fi
 
+    local services=()
+    if [[ -d "$device_dir" ]]; then
+        local project
+        for project in "${projects[@]}"; do
+            local compose_path
+            if [[ "$project" == "$device" && -f "$device_dir/compose.yaml" ]]; then
+                compose_path="$device_dir/compose.yaml"
+            else
+                compose_path="$device_dir/$project/compose.yaml"
+            fi
+            [[ -f "$compose_path" ]] || continue
+            while IFS= read -r service; do
+                [[ -n "$service" ]] || continue
+                services+=("$service")
+            done < <(awk '
+                /^services:[[:space:]]*$/ { in_services=1; next }
+                in_services && /^[^[:space:]]/ { in_services=0 }
+                in_services && /^[[:space:]][[:space:]][A-Za-z0-9_.-]+:[[:space:]]*$/ {
+                    line=$0
+                    sub(/^[[:space:]]+/, "", line)
+                    sub(/:[[:space:]]*$/, "", line)
+                    print line
+                }
+            ' "$compose_path")
+        done
+    fi
+
     case "$subcmd" in
         exec)
             if [[ "$cur" == -* ]]; then
@@ -77,6 +104,18 @@ _arcane() {
                 [[ "${words[i]}" == "--" ]] && return 0
             done
             COMPREPLY=($(compgen -W "${projects[*]} --device -d --" -- "$cur"))
+            return 0
+            ;;
+        bash)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--device -d --project -p" -- "$cur"))
+                return 0
+            fi
+            if [[ "$prev" == "--project" || "$prev" == "-p" ]]; then
+                COMPREPLY=($(compgen -W "${projects[*]}" -- "$cur"))
+                return 0
+            fi
+            COMPREPLY=($(compgen -W "${services[*]} --device -d --project -p" -- "$cur"))
             return 0
             ;;
         rm)
