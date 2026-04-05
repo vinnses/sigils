@@ -1,0 +1,6 @@
+host: 127.0.0.1
+port_range_start: 17700
+port_range_end: 17799
+theme: github
+watch: true
+open: false

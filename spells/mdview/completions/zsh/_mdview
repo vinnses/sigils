@@ -1,0 +1,38 @@
+#compdef mdview
+
+local -a subcommands
+subcommands=(
+  'serve:serve a file or directory'
+  'list:list background instances'
+  'stop:stop a background instance'
+  'open:print the URL for an instance'
+)
+
+_arguments \
+  '1:command:->command' \
+  '*::arg:->args'
+
+case $state in
+  command)
+    _describe 'command' subcommands
+    ;;
+  args)
+    case $words[2] in
+      serve)
+        _arguments \
+          '--background[run in background]' \
+          '-b[run in background]' \
+          '--port[bind to a specific port]:port:' \
+          '-p[bind to a specific port]:port:' \
+          '--theme[select a theme]:theme:(github vscode)' \
+          '-t[select a theme]:theme:(github vscode)' \
+          '--open[print the selected URL]' \
+          '--no-watch[disable live reload]' \
+          '*:path:_files'
+        ;;
+      stop|open)
+        _files
+        ;;
+    esac
+    ;;
+esac

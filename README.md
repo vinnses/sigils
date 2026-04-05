@@ -51,3 +51,8 @@ Use `sigils list`, `sigils enable <spell>`, and `sigils disable <spell>` to mana
 - `make executable`: ensure `spells/*/bin/*` are executable
 - `make new SPELL=<name>`: generate a full spell scaffold and run `make link`
 - `make test`, `make check`, `make fmt`, `make clean`: delegate to spell Makefiles when available
+
+## Examples
+
+- `arcane status`
+- `mdview README.md`

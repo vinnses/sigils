@@ -1,0 +1,6 @@
+complete -c mdview -f -n '__fish_use_subcommand' -a 'serve list stop open'
+complete -c mdview -n '__fish_seen_subcommand_from serve' -s b -l background -d 'Run in background'
+complete -c mdview -n '__fish_seen_subcommand_from serve' -s p -l port -d 'Bind to a specific port'
+complete -c mdview -n '__fish_seen_subcommand_from serve' -s t -l theme -a 'github vscode' -d 'Select a theme'
+complete -c mdview -n '__fish_seen_subcommand_from serve' -l open -d 'Print the selected URL'
+complete -c mdview -n '__fish_seen_subcommand_from serve' -l no-watch -d 'Disable live reload'
