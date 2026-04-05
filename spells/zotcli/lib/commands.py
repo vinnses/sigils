@@ -827,12 +827,7 @@ def cmd_visual(args):
 
 
 def cmd_off(args):
-    """Deactivate visual mode and reset navigation state to root.
-
-    DEPRECATED: Use 'zotcli visual --off' to hide the prompt,
-    or 'zotcli cd ^' to go to root.
-    """
-    print("[deprecated] Use 'zot visual --off' + 'zot cd ^' instead.", file=sys.stderr)
+    """Deactivate visual mode and reset navigation state to root."""
     _state.reset_state()
     _emit_env(ZOTCLI_VISUAL="", ZOTCLI_PATH="",
               ZOTCLI_PROMPT_COLOR="")
@@ -898,12 +893,12 @@ Items:       cp <item> <dest_collection>
 Attachments: touch <item>:<note_name>
              import <file_path> <item>[:<attachment_name>]
 Virtual dirs: ^/.trash  ^/.unfiled  ^/.duplicates  ^/.conflicts
-Setup:       connect  sync  config [key [value]]
-Visual:      visual --on [--color <name>]  visual --off  visual (toggle)
+Setup:       connect  sync  config [key [value]]  off
 Interactive: nav (enter navigation mode — bare commands become zot commands)
 Python:      py  py -c '<code>'  py <script.py>
 
 Field aliases for --fields: label, title, citation_key (ck), author (creator), year, type, meta, key
+Root symbol: ^  (legacy zot:// and z:// are still accepted)
 Global flags: --fresh
 """)
 
@@ -917,7 +912,7 @@ def cmd__complete(args):
     Fast completion helper — reads collection cache only, never calls the API.
     Output: completion_string TAB type, one per line.
 
-    Handles both absolute (zot:// or z://) and relative paths.
+    Handles both absolute (^ and legacy zot:// / z://) and relative paths.
     """
     conn = _open_db()
     db_cols = _db.get_collections(conn)
@@ -935,7 +930,7 @@ def cmd__complete(args):
     st          = _state.read_state()
     path_arg    = args[0] if args else ""
 
-    ROOT = _nav.ROOT  # "zot://"
+    ROOT = _nav.ROOT  # "^"
 
     if not path_arg:
         parent_key  = st.get("collection_key")

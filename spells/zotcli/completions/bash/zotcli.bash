@@ -5,7 +5,7 @@
 # Sourced automatically by the sigils init system (after inits).
 
 _zotcli() {
-    # Temporarily remove ':' from COMP_WORDBREAKS so zot:// isn't split
+    # Temporarily remove ':' from COMP_WORDBREAKS so legacy zot:// isn't split
     local OLD_IFS="$COMP_WORDBREAKS"
     COMP_WORDBREAKS="${COMP_WORDBREAKS//:}"
 
@@ -19,7 +19,7 @@ _zotcli() {
 
     COMP_WORDBREAKS="$OLD_IFS"
 
-    local subcommands="cd pwd ls tree cat get find sync connect config visual nav py help"
+    local subcommands="cd pwd ls tree cat get find sync connect config off nav py help"
 
     # Find the subcommand (skip global flags)
     local subcmd=""
@@ -58,7 +58,7 @@ _zotcli() {
                     [[ -n "$completion" ]] && COMPREPLY+=("$completion")
                 done <<< "$item_results"
                 if [[ "$subcmd" == "cd" ]]; then
-                    COMPREPLY+=($(compgen -W "zot:// .. -" -- "$cur"))
+                    COMPREPLY+=($(compgen -W "^ .. -" -- "$cur"))
                 fi
             fi
             ;;
@@ -106,14 +106,6 @@ _zotcli() {
             COMPREPLY=($(compgen -W \
                 "ls.default_sort ls.sort_reverse ls.default_fields get.default_format get.bib_style cache.ttl_seconds visual.auto visual.color visual.show_sync_age" \
                 -- "$cur"))
-            ;;
-
-        visual)
-            if [[ "$prev" == "--color" ]]; then
-                COMPREPLY=($(compgen -W "cyan green yellow red blue magenta white black bright_cyan bright_green bright_yellow bright_red bright_blue bright_magenta bright_white" -- "$cur"))
-            else
-                COMPREPLY=($(compgen -W "--on --off --color" -- "$cur"))
-            fi
             ;;
 
         py)

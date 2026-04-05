@@ -73,30 +73,30 @@ def test_state_roundtrip():
     try:
         state.write_state(
             collection_key="KEY1",
-            collection_path="zot://Books",
+            collection_path="^/Books",
             item_key="ITEM1",
             item_label="jurafsky2026",
             previous_collection_key="KEY0",
-            previous_collection_path="zot://",
+            previous_collection_path="^",
             previous_item_key=None,
         )
         s = state.read_state()
         assert s["collection_key"] == "KEY1", f"got {s['collection_key']!r}"
-        assert s["collection_path"] == "zot://Books", f"got {s['collection_path']!r}"
+        assert s["collection_path"] == "^/Books", f"got {s['collection_path']!r}"
         assert s["item_key"] == "ITEM1", f"got {s['item_key']!r}"
         assert s["item_label"] == "jurafsky2026", f"got {s['item_label']!r}"
         assert s["previous_collection_key"] == "KEY0"
 
         # full_path with item
-        assert state.full_path(s) == "zot://Books/jurafsky2026", f"got {state.full_path(s)!r}"
+        assert state.full_path(s) == "^/Books/jurafsky2026", f"got {state.full_path(s)!r}"
 
         # reset
         state.reset_state()
         s2 = state.read_state()
         assert s2["collection_key"] is None
-        assert s2["collection_path"] == "zot://"
+        assert s2["collection_path"] == "^"
         assert s2["item_key"] is None
-        assert state.full_path(s2) == "zot://"
+        assert state.full_path(s2) == "^"
     finally:
         state.STATE_FILE = orig
         try: os.unlink(tmp_path)
@@ -105,12 +105,12 @@ def test_state_roundtrip():
 check("state read/write round-trip with item_key", test_state_roundtrip)
 
 # ---------------------------------------------------------------------------
-# 3. navigator.py — zot://, .., -, absolute, relative, item entry, item exit
+# 3. navigator.py — ^, .., -, absolute, relative, item entry, item exit
 # ---------------------------------------------------------------------------
 
 import navigator as nav
 
-ROOT = nav.ROOT  # "zot://"
+ROOT = nav.ROOT  # "^"
 
 cols = [
     {"data": {"key": "ROOT1", "name": "Papers",   "parentCollection": False}},
@@ -125,45 +125,45 @@ items = [
 
 
 def test_nav_root():
-    k, p, ik, il = nav.resolve_path(None, ROOT, "zot://", cols)
+    k, p, ik, il = nav.resolve_path(None, ROOT, "^", cols)
     assert k is None and p == ROOT and ik is None
 
-check("navigator: zot:// goes to root", test_nav_root)
+check("navigator: ^ goes to root", test_nav_root)
 
 
-def test_nav_z_shortcut():
-    k, p, ik, il = nav.resolve_path(None, ROOT, "z://", cols)
+def test_nav_legacy_root_shortcut():
+    k, p, ik, il = nav.resolve_path(None, ROOT, "zot://", cols)
     assert k is None and p == ROOT
 
-check("navigator: z:// shortcut for root", test_nav_z_shortcut)
+check("navigator: legacy root shortcut is canonicalized", test_nav_legacy_root_shortcut)
 
 
 def test_nav_relative():
     k, p, ik, il = nav.resolve_path(None, ROOT, "Papers", cols)
-    assert k == "ROOT1" and p == "zot://Papers"
+    assert k == "ROOT1" and p == "^/Papers"
 
 check("navigator: relative collection name", test_nav_relative)
 
 
 def test_nav_dotdot():
-    k, p, ik, il = nav.resolve_path("ROOT1", "zot://Papers", "..", cols)
+    k, p, ik, il = nav.resolve_path("ROOT1", "^/Papers", "..", cols)
     assert k is None and p == ROOT
 
 check("navigator: .. from collection", test_nav_dotdot)
 
 
 def test_nav_absolute():
-    k, p, ik, il = nav.resolve_path(None, ROOT, "zot://Papers/NLP", cols)
-    assert k == "CHILD1" and p == "zot://Papers/NLP"
+    k, p, ik, il = nav.resolve_path(None, ROOT, "^/Papers/NLP", cols)
+    assert k == "CHILD1" and p == "^/Papers/NLP"
 
-check("navigator: zot:// absolute path", test_nav_absolute)
+check("navigator: ^ absolute path", test_nav_absolute)
 
 
 def test_nav_item_entry():
-    k, p, ik, il = nav.resolve_path("ROOT1", "zot://Papers", "jurafsky2026", cols,
+    k, p, ik, il = nav.resolve_path("ROOT1", "^/Papers", "jurafsky2026", cols,
                                      items=items)
     assert k == "ROOT1"            # collection key unchanged
-    assert p == "zot://Papers"     # collection path unchanged
+    assert p == "^/Papers"     # collection path unchanged
     assert ik == "ITEM1"
     assert il == "jurafsky2026"
 
@@ -171,10 +171,10 @@ check("navigator: cd into item", test_nav_item_entry)
 
 
 def test_nav_item_exit():
-    k, p, ik, il = nav.resolve_path("ROOT1", "zot://Papers", "..", cols,
+    k, p, ik, il = nav.resolve_path("ROOT1", "^/Papers", "..", cols,
                                      item_key="ITEM1")
     assert k == "ROOT1"
-    assert p == "zot://Papers"
+    assert p == "^/Papers"
     assert ik is None
 
 check("navigator: .. exits item", test_nav_item_exit)
@@ -182,26 +182,26 @@ check("navigator: .. exits item", test_nav_item_exit)
 
 def test_nav_dash():
     k, p, ik, il = nav.resolve_path(
-        "ROOT1", "zot://Papers", "-", cols,
-        previous_key="ROOT2", previous_path="zot://Books", previous_item_key=None
+        "ROOT1", "^/Papers", "-", cols,
+        previous_key="ROOT2", previous_path="^/Books", previous_item_key=None
     )
-    assert k == "ROOT2" and p == "zot://Books"
+    assert k == "ROOT2" and p == "^/Books"
 
 check("navigator: - goes to previous", test_nav_dash)
 
 
 def test_nav_build_path():
     p = nav.build_path(cols, "CHILD1")
-    assert p == "zot://Papers/NLP", f"got {p!r}"
+    assert p == "^/Papers/NLP", f"got {p!r}"
     assert nav.build_path(cols, None) == ROOT
 
 check("navigator.build_path", test_nav_build_path)
 
 
 def test_path_up():
-    assert nav._path_up("zot://Books/AI") == "zot://Books"
-    assert nav._path_up("zot://Books")    == "zot://"
-    assert nav._path_up("zot://")         == "zot://"
+    assert nav._path_up("^/Books/AI") == "^/Books"
+    assert nav._path_up("^/Books")    == "^"
+    assert nav._path_up("^")          == "^"
 
 check("navigator._path_up", test_path_up)
 
