@@ -4,6 +4,8 @@ Local Markdown preview spell for files and directories.
 
 ## Commands
 
+- `sigils install mdview`
+- `sigils install --dev mdview`
 - `mdview [PATH]`
 - `mdview serve [PATH]`
 - `mdview list`
@@ -33,6 +35,7 @@ mdview stop <id>
 - Port range: `17700-17799`
 - Theme: `github`
 - Watch: enabled
+- Install: required before first use via `sigils install mdview`
 
 ## Non-goals
 

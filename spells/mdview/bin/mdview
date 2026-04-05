@@ -7,19 +7,15 @@ SPELL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 unset _SCRIPT
 
 VENV="$SPELL_DIR/.venv"
-if [[ -d "$VENV" ]]; then
+if [[ -x "$VENV/bin/python3" ]]; then
     PYTHON="$VENV/bin/python3"
 else
-    PYTHON="python3"
+    echo "error: mdview is not installed; run 'sigils install mdview' or 'sigils install --dev mdview'" >&2
+    exit 1
 fi
 
 export SPELL_DIR
 export MDVIEW_CALLER_CWD="${PWD}"
 
-if [[ -x "$PYTHON" ]]; then
-    cd "$SPELL_DIR" || exit 1
-    exec "$PYTHON" -m lib.commands "$@"
-fi
-
 cd "$SPELL_DIR" || exit 1
-exec uv run python -m lib.commands "$@"
+exec "$PYTHON" -m lib.commands "$@"

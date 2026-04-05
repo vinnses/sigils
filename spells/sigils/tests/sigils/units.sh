@@ -56,6 +56,34 @@ assert_contains() {
   fi
 }
 
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+  TEST_COUNT=$((TEST_COUNT + 1))
+  if [[ "$actual" == "$expected" ]]; then
+    pass "$message"
+  else
+    printf '  expected: %s\n' "$expected"
+    printf '  actual:   %s\n' "$actual"
+    fail "$message"
+  fi
+}
+
+assert_status() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+  TEST_COUNT=$((TEST_COUNT + 1))
+  if [[ "$actual" == "$expected" ]]; then
+    pass "$message"
+  else
+    printf '  expected status: %s\n' "$expected"
+    printf '  actual status:   %s\n' "$actual"
+    fail "$message"
+  fi
+}
+
 run_cmd() {
   set +e
   CMD_OUTPUT="$("$@" 2>&1)"
@@ -77,6 +105,34 @@ make_fixture() {
   printf 'export BLOCKED_INIT_LOADED=1\n' >"$REPO_FIXTURE/spells/blocked/inits/bash/blocked.bash"
   printf 'export BLOCKED_COMPLETION_LOADED=1\n' >"$REPO_FIXTURE/spells/blocked/completions/bash/blocked.bash"
   printf '#!/usr/bin/env bash\necho alpha\n' >"$REPO_FIXTURE/spells/alpha/bin/alpha"
+  cat >"$REPO_FIXTURE/spells/alpha/README.md" <<'EOF'
+# alpha
+
+Alpha spell fixture documentation.
+EOF
+  cat >"$REPO_FIXTURE/spells/alpha/Makefile" <<'EOF'
+SHELL := /bin/bash
+
+.PHONY: install install-dev test check fmt clean
+
+install:
+	@printf 'install\n' >> install.log
+
+install-dev:
+	@printf 'install-dev\n' >> install-dev.log
+
+test:
+	@printf 'test\n' >> test.log
+
+check:
+	@printf 'check\n' >> check.log
+
+fmt:
+	@printf 'fmt\n' >> fmt.log
+
+clean:
+	@printf 'clean\n' >> clean.log
+EOF
   chmod +x "$REPO_FIXTURE/spells/blocked/bin/blocked" "$REPO_FIXTURE/spells/alpha/bin/alpha"
 
   mkdir -p "$REPO_FIXTURE/config"
@@ -113,6 +169,26 @@ main() {
     TEST_COUNT=$((TEST_COUNT + 1))
     pass "sigils enable removes the spell from config"
   fi
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" install alpha
+  assert_status "$CMD_STATUS" "0" "sigils install runs the spell install target"
+  assert_contains "$(cat "$REPO_FIXTURE/spells/alpha/install.log")" "install" "sigils install delegates to the spell Makefile"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" install --dev alpha
+  assert_status "$CMD_STATUS" "0" "sigils install --dev runs the spell dev install target"
+  assert_contains "$(cat "$REPO_FIXTURE/spells/alpha/install-dev.log")" "install-dev" "sigils install --dev delegates to install-dev"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" check alpha
+  assert_status "$CMD_STATUS" "0" "sigils check accepts a spell selector"
+  assert_contains "$(cat "$REPO_FIXTURE/spells/alpha/check.log")" "check" "sigils check delegates to the requested spell"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" man alpha
+  assert_status "$CMD_STATUS" "0" "sigils man renders spell documentation"
+  assert_contains "$CMD_OUTPUT" "Alpha spell fixture documentation." "sigils man prints the spell README"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" cd alpha
+  assert_status "$CMD_STATUS" "0" "sigils cd resolves the spell directory"
+  assert_eq "$CMD_OUTPUT" "$REPO_FIXTURE/spells/alpha" "sigils cd prints the absolute spell path"
 
   if [[ "$FAIL_COUNT" -ne 0 ]]; then
     printf '%s tests failed\n' "$FAIL_COUNT"
