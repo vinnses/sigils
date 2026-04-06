@@ -2,6 +2,9 @@
 
 Feature-oriented shell tooling workspace.
 
+- `spells/` are user-facing tools linked into root `bin/`
+- `rites/` are internal setup and maintenance workflows reached via `sigils`
+
 ## Repository Layout
 
 ```text
@@ -22,6 +25,18 @@ Feature-oriented shell tooling workspace.
 │   │   │   ├── zsh/
 │   │   │   └── fish/
 │   │   ├── desktop/           # placeholder
+│   │   ├── data/.gitkeep
+│   │   ├── logs/.gitkeep
+│   │   ├── Makefile
+│   │   └── README.md
+├── rites/
+│   ├── <rite>/
+│   │   ├── bin/               # internal rite entrypoint, reached via sigils
+│   │   ├── lib/               # rite-local libraries
+│   │   ├── tests/             # rite-local tests/fixtures
+│   │   ├── docs/              # rite-local docs
+│   │   ├── config/            # rite-local config files
+│   │   ├── templates/         # rite-local config templates
 │   │   ├── data/.gitkeep
 │   │   ├── logs/.gitkeep
 │   │   ├── Makefile
@@ -48,6 +63,10 @@ Use `sigils list`, `sigils enable <spell>`, and `sigils disable <spell>` to mana
 - `make link`: recreate symlinks in root `bin/` for enabled spells only
 - `make unlink`: remove only symlinks from root `bin/`
 - `make list`: list spells, status, and detected entrypoints
+- `sigils rites`: list internal rites
+- `sigils rites status [--all|<rite>]`: aggregate rite status
+- `sigils rites doctor [--all|<rite>]`: aggregate rite diagnostics
+- `sigils rite <name> [args...]`: dispatch to a rite entrypoint
 - `make executable`: ensure `spells/*/bin/*` are executable
 - `make new SPELL=<name>`: generate a full spell scaffold and run `make link`
 - `make test`, `make check`, `make fmt`, `make clean`: delegate to spell Makefiles when available

@@ -99,16 +99,23 @@ make_fixture() {
   mkdir -p "$REPO_FIXTURE/spells/blocked/bin" \
            "$REPO_FIXTURE/spells/blocked/inits/bash" \
            "$REPO_FIXTURE/spells/blocked/completions/bash" \
-           "$REPO_FIXTURE/spells/alpha/bin"
+           "$REPO_FIXTURE/spells/alpha/bin" \
+           "$REPO_FIXTURE/rites/mail/bin"
 
   printf '#!/usr/bin/env bash\necho blocked\n' >"$REPO_FIXTURE/spells/blocked/bin/blocked"
   printf 'export BLOCKED_INIT_LOADED=1\n' >"$REPO_FIXTURE/spells/blocked/inits/bash/blocked.bash"
   printf 'export BLOCKED_COMPLETION_LOADED=1\n' >"$REPO_FIXTURE/spells/blocked/completions/bash/blocked.bash"
   printf '#!/usr/bin/env bash\necho alpha\n' >"$REPO_FIXTURE/spells/alpha/bin/alpha"
+  printf '#!/usr/bin/env bash\nprintf "mail:%%s\\n" "${1:-noop}"\n' >"$REPO_FIXTURE/rites/mail/bin/mail"
   cat >"$REPO_FIXTURE/spells/alpha/README.md" <<'EOF'
 # alpha
 
 Alpha spell fixture documentation.
+EOF
+  cat >"$REPO_FIXTURE/rites/mail/README.md" <<'EOF'
+# mail
+
+Mail rite fixture documentation.
 EOF
   cat >"$REPO_FIXTURE/spells/alpha/Makefile" <<'EOF'
 SHELL := /bin/bash
@@ -133,7 +140,7 @@ fmt:
 clean:
 	@printf 'clean\n' >> clean.log
 EOF
-  chmod +x "$REPO_FIXTURE/spells/blocked/bin/blocked" "$REPO_FIXTURE/spells/alpha/bin/alpha"
+  chmod +x "$REPO_FIXTURE/spells/blocked/bin/blocked" "$REPO_FIXTURE/spells/alpha/bin/alpha" "$REPO_FIXTURE/rites/mail/bin/mail"
 
   mkdir -p "$REPO_FIXTURE/config"
   printf 'blocked\nzotcli\n' >"$REPO_FIXTURE/config/spells.disabled"
@@ -157,6 +164,29 @@ main() {
   run_cmd "$REPO_FIXTURE/bin/sigils" list
   assert_contains "$CMD_OUTPUT" "enabled alpha" "sigils list shows enabled spells"
   assert_contains "$CMD_OUTPUT" "disabled blocked" "sigils list shows disabled spells"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rites
+  assert_contains "$CMD_OUTPUT" "mail" "sigils rites lists discovered rites"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rites path mail
+  assert_status "$CMD_STATUS" "0" "sigils rites path resolves a rite directory"
+  assert_eq "$CMD_OUTPUT" "$REPO_FIXTURE/rites/mail" "sigils rites path prints the absolute rite path"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rites docs mail
+  assert_status "$CMD_STATUS" "0" "sigils rites docs resolves rite documentation"
+  assert_contains "$CMD_OUTPUT" "Mail rite fixture documentation." "sigils rites docs renders the rite README"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rites status --all
+  assert_status "$CMD_STATUS" "0" "sigils rites status --all aggregates rite status"
+  assert_contains "$CMD_OUTPUT" "mail:status" "sigils rites status --all runs rite status"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rites doctor mail
+  assert_status "$CMD_STATUS" "0" "sigils rites doctor accepts a rite selector"
+  assert_contains "$CMD_OUTPUT" "mail:doctor" "sigils rites doctor forwards to the selected rite"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rite mail status
+  assert_status "$CMD_STATUS" "0" "sigils rite dispatches to the rite entrypoint"
+  assert_contains "$CMD_OUTPUT" "mail:status" "sigils rite forwards rite arguments"
 
   run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" disable alpha
   assert_contains "$(cat "$REPO_FIXTURE/config/spells.disabled")" "alpha" "sigils disable records the spell in config"

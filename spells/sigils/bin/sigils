@@ -4,6 +4,7 @@ set -euo pipefail
 
 SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 source "$SPELL_DIR/../../lib/common/spells.bash"
+source "$SPELL_DIR/../../lib/common/rites.bash"
 
 usage() {
     cat <<'EOF'
@@ -22,6 +23,11 @@ Usage:
   sigils clean [--all|<spell>]
   sigils man <spell>
   sigils cd <spell>
+  sigils rites
+  sigils rites list
+  sigils rites path <rite>
+  sigils rites docs <rite>
+  sigils rite <rite> [args...]
 EOF
 }
 
@@ -31,6 +37,43 @@ require_spell() {
         echo "error: unknown spell: $spell" >&2
         exit 1
     fi
+}
+
+require_rite() {
+    local rite="$1"
+    if ! sigils_rite_entrypoint "$rite" >/dev/null; then
+        echo "error: unknown rite: $rite" >&2
+        exit 1
+    fi
+}
+
+run_rite_target() {
+    local rite="$1"
+    local subcommand="$2"
+
+    require_rite "$rite"
+    "$(sigils_rite_entrypoint "$rite")" "$subcommand"
+}
+
+run_rites_target() {
+    local subcommand="$1"
+    local selector="${2:---all}"
+    local matched=false
+
+    if [[ "$selector" == "--all" ]]; then
+        while IFS=$'\t' read -r rite _rite_dir; do
+            matched=true
+            run_rite_target "$rite" "$subcommand"
+        done < <(sigils_iter_rites)
+    else
+        matched=true
+        run_rite_target "$selector" "$subcommand"
+    fi
+
+    $matched || {
+        echo "error: no rites found" >&2
+        exit 1
+    }
 }
 
 run_make() {
@@ -143,6 +186,44 @@ case "${1:-}" in
         [[ $# -eq 2 ]] || { echo "error: cd requires a spell name" >&2; exit 1; }
         require_spell "$2"
         sigils_spell_dir "$2"
+        ;;
+    rites)
+        case "${2:-list}" in
+            list)
+                while IFS=$'\t' read -r rite _rite_dir; do
+                    printf '%s\n' "$rite"
+                done < <(sigils_iter_rites)
+                ;;
+            path)
+                [[ $# -eq 3 ]] || { echo "error: rites path requires a rite name" >&2; exit 1; }
+                require_rite "$3"
+                sigils_rite_dir "$3"
+                ;;
+            docs)
+                [[ $# -eq 3 ]] || { echo "error: rites docs requires a rite name" >&2; exit 1; }
+                require_rite "$3"
+                cat "$(sigils_rite_doc_path "$3")"
+                ;;
+            status)
+                [[ $# -le 3 ]] || { echo "error: rites status accepts at most one selector" >&2; exit 1; }
+                run_rites_target status "${3:---all}"
+                ;;
+            doctor)
+                [[ $# -le 3 ]] || { echo "error: rites doctor accepts at most one selector" >&2; exit 1; }
+                run_rites_target doctor "${3:---all}"
+                ;;
+            *)
+                echo "error: unknown rites subcommand: ${2:-}" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    rite)
+        [[ $# -ge 2 ]] || { echo "error: rite requires a rite name" >&2; exit 1; }
+        require_rite "$2"
+        rite_entrypoint="$(sigils_rite_entrypoint "$2")"
+        shift 2
+        exec "$rite_entrypoint" "$@"
         ;;
     --help|-h|help|"")
         usage

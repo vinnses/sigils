@@ -19,6 +19,12 @@ sigils fmt [--all|<spell>]
 sigils clean [--all|<spell>]
 sigils man <spell>
 sigils cd <spell>
+sigils rites
+sigils rites list
+sigils rites path <rite>
+sigils rites status [--all|<rite>]
+sigils rites doctor [--all|<rite>]
+sigils rite <rite> [args...]
 ```
 
 `config/spells.disabled` is the source of truth for spells that should not be linked into `bin/` and should not have shell init or completions sourced.
