@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+RITE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+source "$RITE_DIR/lib/packages.sh"
+source "$RITE_DIR/lib/gpg.sh"
+source "$RITE_DIR/lib/pass.sh"
+source "$RITE_DIR/lib/config.sh"
+source "$RITE_DIR/lib/common.sh"
+
+case "${1:-}" in
+    docs)
+        cat "$RITE_DIR/README.md"
+        ;;
+    setup)
+        mail_run_setup
+        ;;
+    status)
+        mail_print_status
+        ;;
+    doctor)
+        mail_run_doctor
+        ;;
+    uninstall)
+        mail_run_uninstall
+        ;;
+    sync)
+        mail_exec_or_print mbsync -a
+        ;;
+    index)
+        mail_exec_or_print notmuch new
+        ;;
+    send-test)
+        shift
+        mail_exec_or_print msmtp --read-envelope-from --read-recipients "$@"
+        ;;
+    test)
+        mail_run_test
+        ;;
+    --help|-h|help|"")
+        cat <<'EOF'
+Usage: mail <subcommand>
+EOF
+        ;;
+    *)
+        echo "error: unknown subcommand: $1" >&2
+        exit 1
+        ;;
+esac
