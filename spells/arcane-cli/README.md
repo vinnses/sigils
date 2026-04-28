@@ -6,7 +6,7 @@ Operational CLI for Arcane compose projects.
 
 ```bash
 arcane <subcommand> [projects...] [--exclude|-e excludes...] [--device|-d device]
-arcane exec [--device|-d device] <project> <service> -- <command...>
+arcane exec [--device|-d device] [--project|-p project] <service> -- <command...>
 arcane bash [--device|-d device] [--project|-p project] <service>
 arcane rm <containers|images|networks|volumes|all> [projects...] [--exclude|-e excludes...] [--device|-d device]
 ```
@@ -18,7 +18,7 @@ arcane rm <containers|images|networks|volumes|all> [projects...] [--exclude|-e e
 | `up`, `down`, `pull`, `restart`, `status` | Batch lifecycle commands for selected projects |
 | `cd` | Shell helper when `init/env.bash` is sourced |
 | `path` | Print the absolute path for one project |
-| `exec` | Run a command inside one project service |
+| `exec` | Run a command inside one service, inferring the project when the service name is unique |
 | `bash` | Open `bash` in one service, inferring the project when the service name is unique |
 | `resources` | Show containers, images, networks, and volumes tied to projects |
 | `rm` | Remove one resource type for selected projects |
@@ -31,7 +31,8 @@ arcane rm <containers|images|networks|volumes|all> [projects...] [--exclude|-e e
 ```bash
 arcane up
 arcane up -d lilith kopia taildns
-arcane exec -d lilith taildns app -- sh -lc 'echo ok'
+arcane exec -d lilith app -- sh -lc 'echo ok'
+arcane exec -d lilith -p taildns app -- sh -lc 'echo ok'
 arcane bash -d lilith vibecode
 arcane bash -d lilith -p vibespace vibecode
 arcane resources -d lilith taildns
@@ -44,5 +45,6 @@ cd "$(arcane path -d lilith taildns)"
 
 - `run` was removed. Use `exec` for service-level commands and lifecycle subcommands for project-wide actions.
 - `exec` keeps `--` mandatory so the command boundary stays explicit.
+- `exec` and `bash` use `--project/-p` when a service name exists in multiple projects.
 - `arcane cd <project>` changes the current shell directory only when the Sigils init script has been sourced.
 - `ARCANE_DIR` defaults to `~/arcane`.

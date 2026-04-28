@@ -9,7 +9,7 @@ _arcane_usage() {
     cat <<'EOF'
 Usage:
   arcane <subcommand> [projects...] [--exclude|-e excludes...] [--device|-d device]
-  arcane exec [--device|-d device] <project> <service> -- <command...>
+  arcane exec [--device|-d device] [--project|-p project] <service> -- <command...>
   arcane bash [--device|-d device] [--project|-p project] <service>
   arcane rm <containers|images|networks|volumes|all> [projects...] [--exclude|-e excludes...] [--device|-d device]
 
@@ -24,7 +24,7 @@ Subcommands:
   ls         List projects on device (optionally only up or down)
   cd         Shell helper when sourced; otherwise prints the project path
   path       Print the absolute path for one project
-  exec       Run a command inside one project service
+  exec       Run a command inside one service, resolving the project by service name when unique
   bash       Open bash in one service, resolving the project by service name when unique
   resources  Show containers, images, networks, and volumes tied to projects
   rm         Remove one resource type for the selected projects
@@ -132,7 +132,7 @@ case "${1:-}" in
         _arcane_rm "$resource_type" "$@"
         ;;
     run)
-        echo "error: run has been removed. Use 'arcane exec <project> <service> -- <command...>' or a lifecycle subcommand." >&2
+        echo "error: run has been removed. Use 'arcane exec <service> -- <command...>' or a lifecycle subcommand." >&2
         exit 1
         ;;
     favorites)

@@ -108,6 +108,9 @@ case "$*" in
   "compose exec api echo hello")
     exit 0
     ;;
+  "compose exec vibecode echo beta")
+    exit 0
+    ;;
   "compose exec api bash")
     exit 0
     ;;
@@ -148,6 +151,13 @@ cleanup_fixture() {
   rm -rf "$FIXTURE_DIR"
 }
 
+complete_arcane() {
+  COMP_WORDS=("$@")
+  COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+  _arcane
+  printf '%s\n' "${COMPREPLY[@]}" | sort -u
+}
+
 main() {
   make_fixture
   trap cleanup_fixture EXIT
@@ -156,17 +166,34 @@ main() {
   export PATH="$FIXTURE_DIR/fakebin:$PATH"
   export SIGILS_ROOT="$(cd "$SPELL_DIR/../.." && pwd)"
 
-  run_cmd "$ARCANE_BIN" exec -d testbox web -- echo hello
-  assert_status "$CMD_STATUS" "1" "exec requires an explicit service argument"
-  assert_contains "$CMD_OUTPUT" "requires exactly one project and one service" "exec explains the missing service contract"
+  run_cmd "$ARCANE_BIN" exec -d testbox api -- echo hello
+  assert_status "$CMD_STATUS" "0" "exec resolves a unique service without requiring a project"
+  assert_contains "$(cat "$ARCANE_TEST_LOG")" "compose exec api echo hello" "exec forwards the service command with '--'"
 
-  run_cmd "$ARCANE_BIN" exec -d testbox web api echo hello
+  run_cmd "$ARCANE_BIN" exec -d testbox api echo hello
   assert_status "$CMD_STATUS" "1" "exec requires the separator before the command"
   assert_contains "$CMD_OUTPUT" "requires '--' before the command" "exec explains the separator requirement"
 
-  run_cmd "$ARCANE_BIN" exec -d testbox web api -- echo hello
+  run_cmd "$ARCANE_BIN" exec -d testbox vibecode -- echo hello
+  assert_status "$CMD_STATUS" "1" "exec rejects ambiguous service names"
+  assert_contains "$CMD_OUTPUT" "matches multiple projects" "exec explains the ambiguity"
+  assert_contains "$CMD_OUTPUT" "--project" "exec points to the project selector"
+
+  run_cmd "$ARCANE_BIN" exec -d testbox --project beta vibecode -- echo beta
   assert_status "$CMD_STATUS" "0" "exec accepts command arguments with the separator"
-  assert_contains "$(cat "$ARCANE_TEST_LOG")" "compose exec api echo hello" "exec forwards the service command with '--'"
+  assert_contains "$(cat "$ARCANE_TEST_LOG")" "$FIXTURE_DIR/arcane/testbox/beta|compose exec vibecode echo beta" "exec targets the selected project"
+
+  source "$SPELL_DIR/completions/bash/arcane.bash"
+  assert_contains "$(complete_arcane arcane exec -d testbox "")" "api" "exec completion suggests services"
+  if grep -Fxq "web" <<<"$(complete_arcane arcane exec -d testbox "")"; then
+    TEST_COUNT=$((TEST_COUNT + 1))
+    printf '  completion unexpectedly included project: web\n'
+    fail "exec completion excludes project names"
+  else
+    TEST_COUNT=$((TEST_COUNT + 1))
+    pass "exec completion excludes project names"
+  fi
+  assert_contains "$(complete_arcane arcane exec -d testbox --project "")" "beta" "exec completion suggests projects after --project"
 
   run_cmd "$ARCANE_BIN" bash -d testbox api
   assert_status "$CMD_STATUS" "0" "bash resolves a unique service without requiring a project"

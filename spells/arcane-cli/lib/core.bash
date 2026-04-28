@@ -358,6 +358,7 @@ _arcane_path() {
 
 _arcane_exec() {
     local device="$(hostname)"
+    local project=""
     local positional=()
     local cmd=()
     local seen_separator=false
@@ -367,6 +368,11 @@ _arcane_exec() {
             --device|-d)
                 [[ $# -lt 2 ]] && { echo "error: --device requires a value" >&2; return 1; }
                 device="$2"
+                shift 2
+                ;;
+            --project|-p)
+                [[ $# -lt 2 ]] && { echo "error: --project requires a value" >&2; return 1; }
+                project="$2"
                 shift 2
                 ;;
             --)
@@ -386,22 +392,43 @@ _arcane_exec() {
         esac
     done
 
-    if [[ ${#positional[@]} -lt 2 ]]; then
-        echo "error: exec requires exactly one project and one service before the command" >&2
-        return 1
-    fi
-    if [[ ${#positional[@]} -gt 2 ]]; then
-        echo "error: exec requires '--' before the command" >&2
-        return 1
-    fi
     $seen_separator || { echo "error: exec requires '--' before the command" >&2; return 1; }
+    [[ ${#positional[@]} -eq 1 ]] || { echo "error: exec requires exactly one service name before '--'" >&2; return 1; }
     [[ ${#cmd[@]} -gt 0 ]] || { echo "error: exec requires a command after '--'" >&2; return 1; }
 
     ARCANE_DEVICE="$device"
-    local path
-    path="$(_arcane_resolve_project "${positional[0]}")" || return 1
 
-    (cd "$path" && docker compose exec "${positional[1]}" "${cmd[@]}")
+    local service="${positional[0]}"
+    local target_project="$project"
+    local target_path=""
+
+    if [[ -n "$project" ]]; then
+        target_path="$(_arcane_resolve_project "$project")" || return 1
+
+        if ! _arcane_project_services "$target_path" | grep -Fxq "$service"; then
+            echo "error: service '$service' not found in project '$project' on device '$ARCANE_DEVICE'" >&2
+            return 1
+        fi
+    else
+        local matches=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && matches+=("$line")
+        done < <(_arcane_find_service_projects "$service")
+
+        if [[ ${#matches[@]} -eq 0 ]]; then
+            echo "error: service '$service' not found on device '$ARCANE_DEVICE'" >&2
+            return 1
+        fi
+
+        if [[ ${#matches[@]} -gt 1 ]]; then
+            echo "error: service '$service' matches multiple projects on device '$ARCANE_DEVICE'; use --project/-p" >&2
+            return 1
+        fi
+
+        IFS=$'\t' read -r target_project target_path <<<"${matches[0]}"
+    fi
+
+    (cd "$target_path" && docker compose exec "$service" "${cmd[@]}")
 }
 
 _arcane_bash() {

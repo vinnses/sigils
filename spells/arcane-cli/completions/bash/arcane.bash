@@ -97,13 +97,42 @@ _arcane() {
     case "$subcmd" in
         exec)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--device -d" -- "$cur"))
+                COMPREPLY=($(compgen -W "--device -d --project -p --" -- "$cur"))
+                return 0
+            fi
+            if [[ "$prev" == "--project" || "$prev" == "-p" ]]; then
+                COMPREPLY=($(compgen -W "${projects[*]}" -- "$cur"))
                 return 0
             fi
             for ((i = 2; i < cword; i++)); do
                 [[ "${words[i]}" == "--" ]] && return 0
             done
-            COMPREPLY=($(compgen -W "${projects[*]} --device -d --" -- "$cur"))
+            local service_arg_count=0
+            local skip_next=false
+            for ((i = 2; i < cword; i++)); do
+                if $skip_next; then
+                    skip_next=false
+                    continue
+                fi
+                case "${words[i]}" in
+                    --device|-d|--project|-p)
+                        skip_next=true
+                        ;;
+                    --)
+                        return 0
+                        ;;
+                    -*)
+                        ;;
+                    *)
+                        service_arg_count=$((service_arg_count + 1))
+                        ;;
+                esac
+            done
+            if [[ $service_arg_count -eq 0 ]]; then
+                COMPREPLY=($(compgen -W "${services[*]} --device -d --project -p --" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -W "--" -- "$cur"))
+            fi
             return 0
             ;;
         bash)
