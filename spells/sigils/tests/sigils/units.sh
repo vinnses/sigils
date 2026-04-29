@@ -157,6 +157,8 @@ main() {
   run_cmd make -C "$REPO_FIXTURE" link
   assert_file_exists "$REPO_FIXTURE/bin/alpha" "make link keeps enabled spell entrypoints"
   assert_file_missing "$REPO_FIXTURE/bin/blocked" "make link skips disabled spell entrypoints"
+  assert_file_exists "$REPO_FIXTURE/bin/rite" "make link exposes the short rite dispatcher"
+  assert_file_exists "$REPO_FIXTURE/bin/rites" "make link exposes the short rites dispatcher"
 
   run_cmd bash -lc "source '$REPO_FIXTURE/init/env.bash'; printf '%s:%s' \"\${BLOCKED_INIT_LOADED:-0}\" \"\${BLOCKED_COMPLETION_LOADED:-0}\""
   assert_contains "$CMD_OUTPUT" "0:0" "init/env.bash does not source disabled spell init or completion"
@@ -196,6 +198,14 @@ main() {
   run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rite mail status
   assert_status "$CMD_STATUS" "0" "sigils rite dispatches to the rite entrypoint"
   assert_contains "$CMD_OUTPUT" "mail:status" "sigils rite forwards rite arguments"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/rites" list
+  assert_status "$CMD_STATUS" "0" "rites dispatches to sigils rites"
+  assert_contains "$CMD_OUTPUT" "mail" "rites lists discovered rites"
+
+  run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/rite" mail status
+  assert_status "$CMD_STATUS" "0" "rite dispatches to sigils rite"
+  assert_contains "$CMD_OUTPUT" "mail:status" "rite forwards rite arguments"
 
   run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" disable alpha
   assert_contains "$(cat "$REPO_FIXTURE/config/spells.disabled")" "alpha" "sigils disable records the spell in config"
