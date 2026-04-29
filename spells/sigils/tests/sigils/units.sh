@@ -164,9 +164,18 @@ main() {
   run_cmd "$REPO_FIXTURE/bin/sigils" list
   assert_contains "$CMD_OUTPUT" "enabled alpha" "sigils list shows enabled spells"
   assert_contains "$CMD_OUTPUT" "disabled blocked" "sigils list shows disabled spells"
+  if grep -Fq "usb-auth" <<<"$CMD_OUTPUT"; then
+    TEST_COUNT=$((TEST_COUNT + 1))
+    printf '  spell list unexpectedly included usb-auth\n'
+    fail "usb-auth is no longer listed as a spell"
+  else
+    TEST_COUNT=$((TEST_COUNT + 1))
+    pass "usb-auth is no longer listed as a spell"
+  fi
 
   run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rites
   assert_contains "$CMD_OUTPUT" "mail" "sigils rites lists discovered rites"
+  assert_contains "$CMD_OUTPUT" "pamusb" "sigils rites lists pamusb as a rite"
 
   run_cmd env SIGILS_ROOT="$REPO_FIXTURE" "$REPO_FIXTURE/bin/sigils" rites path mail
   assert_status "$CMD_STATUS" "0" "sigils rites path resolves a rite directory"

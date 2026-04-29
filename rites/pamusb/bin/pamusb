@@ -1,5 +1,5 @@
 #!/bin/bash
-# usb-auth — USB hardware authentication token configuration
+# pamusb — USB hardware authentication token configuration
 #
 # Configures a dedicated USB pendrive as a hardware auth token for Linux:
 #   1. pam_usb — session auth via USB presence, lock on removal
@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-CONF_FILE="${SPELL_DIR}/config/usb-auth.conf"
+CONF_FILE="${SPELL_DIR}/config/pamusb.conf"
 LOG_FILE="${SPELL_DIR}/logs/setup.log"
 
 source "${SPELL_DIR}/lib/common.sh"
@@ -21,7 +21,7 @@ source "${SPELL_DIR}/lib/sudoers.sh"
 
 usage() {
     cat <<EOF
-Usage: usb-auth <subcommand> [options]
+Usage: pamusb <subcommand> [options]
 
 Subcommands:
   setup              Full interactive wizard (all steps)
@@ -32,6 +32,9 @@ Subcommands:
   status             Show current state of all subsystems
   test               Run diagnostics (pamusb-check, LUKS cycle, sudoers, udev)
   recover            Reset pam_usb OTP pads after desynchronization
+  devices list       List removable partition UUID/LABEL identities
+  devices set        Select the USB identity used by lock/unlock rules
+  devices forget     Remove the selected USB identity from config
 
   rekey              Update keyring password stored in LUKS payload
   provision-host     Add keyring payload for a new hostname on the same USB
@@ -47,14 +50,18 @@ Options:
   --log <file>       Write log to <file> (default: ${LOG_FILE})
 
 Examples:
-  usb-auth setup
-  usb-auth status
-  usb-auth test
-  usb-auth recover
-  usb-auth rekey
-  usb-auth provision-host
-  usb-auth lock-disable
-  usb-auth uninstall
+  pamusb setup
+  pamusb status
+  pamusb test
+  pamusb recover
+  pamusb devices list
+  pamusb devices set --label AUTHKEY
+  pamusb devices set --uuid 1DA7-7194
+  pamusb devices forget
+  pamusb rekey
+  pamusb provision-host
+  pamusb lock-disable
+  pamusb uninstall
 EOF
 }
 
@@ -172,7 +179,7 @@ _wizard_step3_plan() {
                 B) PARTITION_PLAN="delete_recreate" ;;
                 C)
                     printf "\nUse GParted or parted to free 128MiB at the end of %s.\n" "$USB_DEVICE" >&2
-                    printf "Then re-run: usb-auth partition\n\n" >&2
+                    printf "Then re-run: pamusb partition\n\n" >&2
                     exit 0
                     ;;
             esac
@@ -233,7 +240,11 @@ _wizard_step4_partition() {
     [[ "$USB_DEVICE" =~ [0-9]$ ]] && main_part="${USB_DEVICE}p1"
     local main_uuid
     main_uuid=$(usb_get_partition_uuid "$main_part")
+    local main_label
+    main_label=$(usb_get_partition_label "$main_part")
     conf_set "USB_MAIN_PARTITION_UUID" "$main_uuid"
+    [[ -n "$main_label" ]] && conf_set "USB_MAIN_PARTITION_LABEL" "$main_label"
+    usb_set_main_match uuid "$main_uuid"
     conf_set "LUKS_PARTITION_DEVICE" "$LUKS_PARTITION"
 
     print_ok "Partitioning complete. LUKS partition: $LUKS_PARTITION"
@@ -260,16 +271,17 @@ _wizard_step5_pam() {
     pam_add_device "$device_name" "$pam_user" || exit 1
     pam_configure_all
 
-    local main_uuid
-    main_uuid=$(conf_get "USB_MAIN_PARTITION_UUID")
+    local match_kind match_value
+    match_kind="$(usb_current_match_kind)"
+    match_value="$(usb_current_match_value)"
 
-    if [[ -n "$main_uuid" ]]; then
-        pam_install_guard "$pam_user" "$main_uuid"
+    if [[ -n "$match_value" ]]; then
+        pam_install_guard "$pam_user" "${match_kind}-${match_value}"
         pam_install_dispatch "$pam_user"
-        pam_install_udev_lock_rule "$main_uuid"
+        pam_install_udev_lock_rule "$match_kind" "$match_value"
     else
-        log_warn "USB_MAIN_PARTITION_UUID not set — skipping lock/unlock udev rule"
-        log_warn "Run 'usb-auth partition' first, or set manually in config"
+        log_warn "USB main partition identity not set — skipping lock/unlock udev rule"
+        log_warn "Run 'pamusb partition' first, or set it with 'pamusb devices set'"
     fi
 
     conf_mark_step 5
@@ -280,7 +292,7 @@ _wizard_step6_luks() {
 
     LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
     if [[ -z "$LUKS_PARTITION" ]]; then
-        log_error "LUKS partition device not configured. Run 'usb-auth partition' first."
+        log_error "LUKS partition device not configured. Run 'pamusb partition' first."
         exit 1
     fi
 
@@ -334,7 +346,7 @@ _wizard_step8_system() {
 
     # udev suppress rule
     local template_dir="${SPELL_DIR}/templates"
-    local suppress_rule="/etc/udev/rules.d/91-usb-auth-suppress.rules"
+    local suppress_rule="/etc/udev/rules.d/91-pamusb-suppress.rules"
     log_info "Installing udev suppress rule to $suppress_rule"
     sed -e "s|{{LUKS_UUID}}|${luks_uuid}|g" \
         "${template_dir}/udev-suppress.rules" > "$suppress_rule"
@@ -354,7 +366,7 @@ _wizard_step8_system() {
     local home_dir
     home_dir=$(getent passwd "$pam_user" | cut -d: -f6)
     local autostart_dir="${home_dir}/.config/autostart"
-    local autostart_file="${autostart_dir}/usb-auth-keyring.desktop"
+    local autostart_file="${autostart_dir}/pamusb-keyring.desktop"
     sudo -u "$pam_user" mkdir -p "$autostart_dir"
     sed -e "s|{{HOME}}|${home_dir}|g" \
         "${template_dir}/autostart.desktop" > "$autostart_file"
@@ -404,7 +416,7 @@ _wizard_step9_verify() {
     fi
 
     # udev
-    for rule in /etc/udev/rules.d/90-usb-lock.rules /etc/udev/rules.d/91-usb-auth-suppress.rules; do
+    for rule in /etc/udev/rules.d/90-usb-lock.rules /etc/udev/rules.d/91-pamusb-suppress.rules; do
         if [[ -f "$rule" ]]; then
             print_ok "udev rule: $rule"
         else
@@ -436,12 +448,12 @@ _wizard_step10_summary() {
         "${SPELL_DIR}/logs/setup.log"
         "/etc/security/pam_usb.conf"
         "/etc/udev/rules.d/90-usb-lock.rules"
-        "/etc/udev/rules.d/91-usb-auth-suppress.rules"
-        "/etc/sudoers.d/99-usb-auth"
+        "/etc/udev/rules.d/91-pamusb-suppress.rules"
+        "/etc/sudoers.d/99-pamusb"
         "/usr/local/bin/usb-pam-guard.sh"
         "/usr/local/bin/usb-pam-dispatch.sh"
-        "${home_dir}/.local/bin/usb-auth-unlock-keyring.sh"
-        "${home_dir}/.config/autostart/usb-auth-keyring.desktop"
+        "${home_dir}/.local/bin/pamusb-unlock-keyring.sh"
+        "${home_dir}/.config/autostart/pamusb-keyring.desktop"
         "/root/usb-luks.key"
     )
 
@@ -462,12 +474,12 @@ _wizard_step10_summary() {
 
   If locked out:
     Press Ctrl+Alt+F2 for a TTY console — password login still works there.
-    Recover pam_usb pad sync with: sudo usb-auth recover
+    Recover pam_usb pad sync with: sudo pamusb recover
 
   Log files:
     Setup: ${LOG_FILE}
-    Runtime (keyring): \$XDG_RUNTIME_DIR/usb-auth-keyring.log
-    Guard/dispatch:    /tmp/usb-auth-guard.log, /tmp/usb-auth-dispatch.log
+    Runtime (keyring): \$XDG_RUNTIME_DIR/pamusb-keyring.log
+    Guard/dispatch:    /tmp/pamusb-guard.log, /tmp/pamusb-dispatch.log
 EOF
 
     conf_mark_step 10
@@ -481,7 +493,7 @@ cmd_setup() {
     require_root
     conf_load
 
-    print_header "usb-auth full setup wizard"
+    print_header "pamusb full setup wizard"
 
     local last_step
     last_step=$(conf_get "SETUP_STEP_COMPLETED" "0")
@@ -516,7 +528,7 @@ cmd_setup_pam() {
     require_root
     conf_load
 
-    print_header "usb-auth pam_usb setup"
+    print_header "pamusb pam_usb setup"
 
     USB_DEVICE=$(conf_get "USB_DEVICE_PATH" "")
     if [[ -z "$USB_DEVICE" ]]; then
@@ -530,11 +542,11 @@ cmd_setup_keyring() {
     require_root
     conf_load
 
-    print_header "usb-auth keyring setup"
+    print_header "pamusb keyring setup"
 
     LUKS_PARTITION=$(conf_get "LUKS_PARTITION_DEVICE" "")
     if [[ -z "$LUKS_PARTITION" ]]; then
-        log_error "LUKS partition not configured. Run 'usb-auth partition' first."
+        log_error "LUKS partition not configured. Run 'pamusb partition' first."
         exit 1
     fi
 
@@ -553,7 +565,7 @@ cmd_partition() {
     require_root
     conf_load
 
-    print_header "usb-auth partition management"
+    print_header "pamusb partition management"
 
     USB_DEVICE=$(conf_get "USB_DEVICE_PATH" "")
     if [[ -z "$USB_DEVICE" ]]; then
@@ -568,7 +580,7 @@ cmd_partition() {
 cmd_status() {
     conf_load
 
-    print_header "usb-auth status"
+    print_header "pamusb status"
 
     local usb_dev
     usb_dev=$(conf_get "USB_DEVICE_PATH" "")
@@ -584,13 +596,18 @@ cmd_status() {
             print_warn "Device path $usb_dev not present (USB not connected?)"
         fi
     else
-        print_fail "USB device not configured (run 'usb-auth setup')"
+        print_fail "USB device not configured (run 'pamusb setup')"
     fi
 
     print_section "Partitions"
-    local main_uuid
+    local main_uuid main_label match_kind match_value
     main_uuid=$(conf_get "USB_MAIN_PARTITION_UUID" "")
-    [[ -n "$main_uuid" ]] && print_info "Main partition UUID: $main_uuid" || print_fail "Main partition UUID not configured"
+    main_label=$(conf_get "USB_MAIN_PARTITION_LABEL" "")
+    match_kind="$(usb_current_match_kind)"
+    match_value="$(usb_current_match_value)"
+    [[ -n "$main_uuid" ]] && print_info "Main partition UUID: $main_uuid" || print_warn "Main partition UUID not configured"
+    [[ -n "$main_label" ]] && print_info "Main partition LABEL: $main_label" || print_warn "Main partition LABEL not configured"
+    [[ -n "$match_value" ]] && print_info "Active match: ${match_kind}=${match_value}" || print_fail "Main partition match not configured"
     [[ -n "$luks_uuid" ]] && print_info "LUKS partition UUID: $luks_uuid" || print_fail "LUKS partition UUID not configured"
 
     if [[ -n "$luks_uuid" ]]; then
@@ -606,7 +623,7 @@ cmd_status() {
 cmd_test() {
     conf_load
 
-    print_header "usb-auth diagnostics"
+    print_header "pamusb diagnostics"
 
     local pam_user
     pam_user=$(conf_get "PAM_USER" "$USER")
@@ -635,6 +652,72 @@ cmd_recover() {
     local pam_user
     pam_user=$(conf_get "PAM_USER" "$USER")
     pam_recover_pads "$pam_user"
+}
+
+cmd_devices() {
+    conf_load
+    local action="${1:-list}"
+    shift || true
+
+    case "$action" in
+        list)
+            print_header "pamusb devices"
+            print_section "Configured identity"
+            local match_kind match_value
+            match_kind="$(usb_current_match_kind)"
+            match_value="$(usb_current_match_value)"
+            if [[ -n "$match_value" ]]; then
+                print_info "${match_kind}: ${match_value}"
+            else
+                print_warn "No USB identity configured"
+            fi
+
+            print_section "Removable partitions"
+            lsblk -rpo NAME,TYPE,RM,LABEL,UUID,FSTYPE,MOUNTPOINT 2>/dev/null \
+                | awk '$2 == "part" && $3 == "1" {
+                    printf "  %s label=%s uuid=%s fs=%s mount=%s\n", $1, ($4 == "" ? "-" : $4), ($5 == "" ? "-" : $5), ($6 == "" ? "-" : $6), ($7 == "" ? "-" : $7)
+                }'
+            ;;
+        set)
+            local kind="" value=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --uuid)
+                        [[ $# -lt 2 ]] && { log_error "--uuid requires a value"; return 1; }
+                        kind="uuid"
+                        value="$2"
+                        shift 2
+                        ;;
+                    --label)
+                        [[ $# -lt 2 ]] && { log_error "--label requires a value"; return 1; }
+                        kind="label"
+                        value="$2"
+                        shift 2
+                        ;;
+                    *)
+                        log_error "unknown devices set option: $1"
+                        return 1
+                        ;;
+                esac
+            done
+            [[ -n "$kind" && -n "$value" ]] || {
+                log_error "devices set requires --uuid <uuid> or --label <label>"
+                return 1
+            }
+            usb_set_main_match "$kind" "$value"
+            print_ok "Configured USB identity: ${kind}=${value}"
+            print_info "Run 'sudo sigils rite pamusb setup-pam' to regenerate udev lock rules"
+            ;;
+        forget)
+            usb_clear_main_match
+            print_ok "Removed configured USB identity"
+            print_info "Use 'pamusb devices set --uuid <uuid>' or '--label <label>' before regenerating lock rules"
+            ;;
+        *)
+            log_error "unknown devices subcommand: $action"
+            return 1
+            ;;
+    esac
 }
 
 cmd_rekey() {
@@ -687,12 +770,14 @@ cmd_lock_disable() {
     print_ok "Session lock disabled (rule moved to ${disabled})"
 
     # Create a temporary re-enable rule based on USB reconnection
-    local main_uuid
-    main_uuid=$(conf_get "USB_MAIN_PARTITION_UUID")
-    if [[ -n "$main_uuid" ]]; then
+    local match_kind match_value match_env
+    match_kind="$(usb_current_match_kind)"
+    match_value="$(usb_current_match_value)"
+    if [[ -n "$match_value" ]]; then
+        match_env="$(usb_match_env_name "$match_kind")"
         cat > /etc/udev/rules.d/89-usb-lock-reenable.rules <<EOF
 # Temporary: re-enable lock rule on USB reconnection
-ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="${main_uuid}", RUN+="/bin/bash -c 'mv ${disabled} ${rule}; rm /etc/udev/rules.d/89-usb-lock-reenable.rules; udevadm control --reload-rules'"
+ACTION=="add", SUBSYSTEM=="block", ENV{${match_env}}=="${match_value}", RUN+="/bin/bash -c 'mv ${disabled} ${rule}; rm /etc/udev/rules.d/89-usb-lock-reenable.rules; udevadm control --reload-rules'"
 EOF
         udevadm control --reload-rules
         print_info "Will auto-re-enable on next USB connection"
@@ -723,8 +808,8 @@ cmd_uninstall() {
     require_root
     conf_load
 
-    print_header "usb-auth uninstall"
-    log_warn "This will remove all usb-auth system configuration."
+    print_header "pamusb uninstall"
+    log_warn "This will remove all pamusb system configuration."
     echo >&2
 
     local pam_user
@@ -741,8 +826,8 @@ cmd_uninstall() {
     sudoers_uninstall
 
     # Remove udev suppress rule
-    if [[ -f /etc/udev/rules.d/91-usb-auth-suppress.rules ]]; then
-        rm -f /etc/udev/rules.d/91-usb-auth-suppress.rules
+    if [[ -f /etc/udev/rules.d/91-pamusb-suppress.rules ]]; then
+        rm -f /etc/udev/rules.d/91-pamusb-suppress.rules
         print_ok "Removed udev suppress rule"
     fi
 
@@ -762,7 +847,7 @@ COMMAND=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         setup|setup-pam|setup-keyring|partition) COMMAND="$1"; shift; break ;;
-        status|test|recover)                     COMMAND="$1"; shift; break ;;
+        status|test|recover|devices)             COMMAND="$1"; shift; break ;;
         rekey|provision-host)                    COMMAND="$1"; shift; break ;;
         lock-disable|lock-enable)                COMMAND="$1"; shift; break ;;
         uninstall)                               COMMAND="$1"; shift; break ;;
@@ -781,6 +866,7 @@ case "$COMMAND" in
     status)         cmd_status ;;
     test)           cmd_test ;;
     recover)        cmd_recover ;;
+    devices)        cmd_devices "$@" ;;
     rekey)          cmd_rekey ;;
     provision-host) cmd_provision_host ;;
     lock-disable)   cmd_lock_disable ;;

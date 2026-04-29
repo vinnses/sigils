@@ -1,7 +1,7 @@
 #!/bin/bash
 # lib/sudoers.sh — sudoers drop-in generation and validation
 
-SUDOERS_DROPIN="/etc/sudoers.d/99-usb-auth"
+SUDOERS_DROPIN="/etc/sudoers.d/99-pamusb"
 
 sudoers_generate() {
     local username="$1"
@@ -85,7 +85,7 @@ sudoers_validate() {
 sudoers_check_entries() {
     local username="$1"
     print_section "sudo -l check"
-    sudo -l -U "$username" 2>&1 | grep -A5 "usb-auth\|cryptsetup\|luksOpen\|luksClose" | sed 's/^/  /' >&2 || true
+    sudo -l -U "$username" 2>&1 | grep -A5 "pamusb\|cryptsetup\|luksOpen\|luksClose" | sed 's/^/  /' >&2 || true
 }
 
 sudoers_uninstall() {

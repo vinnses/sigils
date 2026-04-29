@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Exec={{HOME}}/.local/bin/usb-auth-unlock-keyring.sh
+Exec={{HOME}}/.local/bin/pamusb-unlock-keyring.sh
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true

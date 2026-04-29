@@ -1,9 +1,9 @@
-# usb-auth — Technical Documentation
+# pamusb — Technical Documentation
 
 ## Architecture overview
 
 ```
-usb-auth (bin/usb-auth)
+pamusb (bin/pamusb)
 ├── lib/common.sh      Logging, colors, confirmations, USB/system detection
 ├── lib/partition.sh   Partition analysis, planning, execution
 ├── lib/pam.sh         pam_usb registration, PAM file patching, lock/unlock scripts
@@ -26,7 +26,7 @@ templates/
 | 1 | Device detection — list removable devices, validate selection |
 | 2 | Partition analysis — read table, list partitions, show layout |
 | 3 | Partition plan — select strategy based on disk state |
-| 4 | Partition execution — apply strategy, record UUIDs |
+| 4 | Partition execution — apply strategy, record UUID/LABEL identities |
 | 5 | pam_usb setup — register device/user, patch PAM files, install lock/unlock |
 | 6 | LUKS setup — generate keyfile, format LUKS2, create ext4 inside |
 | 7 | Keyring provisioning — write password payload to LUKS container |
@@ -36,13 +36,16 @@ templates/
 
 ## Config file
 
-`config/usb-auth.conf` is shell-sourceable. Written incrementally by each step.
+`config/pamusb.conf` is shell-sourceable. Written incrementally by each step.
 
 ```bash
 USB_DEVICE_PATH="/dev/sdb"
 USB_DEVICE_SERIAL="1234567890"
 USB_DEVICE_MODEL="Kingston DataTraveler"
 USB_MAIN_PARTITION_UUID="1DA7-7194"
+USB_MAIN_PARTITION_LABEL="AUTHKEY"
+USB_MAIN_PARTITION_MATCH_KIND="uuid"
+USB_MAIN_PARTITION_MATCH_VALUE="1DA7-7194"
 USB_LUKS_PARTITION_UUID="abcd1234-..."
 LUKS_KEYFILE="/root/usb-luks.key"
 LUKS_MAPPER_NAME="usb-secret"
@@ -56,7 +59,7 @@ SETUP_STEP_COMPLETED="10"
 
 ```
 USB removed
-  → udev ACTION=remove matches 90-usb-lock.rules (MAIN_UUID)
+  → udev ACTION=remove matches 90-usb-lock.rules (UUID or LABEL)
   → executes usb-pam-guard.sh remove
       → debounce check (3s window)
       → executes usb-pam-dispatch.sh remove USERNAME
@@ -71,7 +74,7 @@ USB reconnected
 ## Keyring unlock flow (at session start)
 
 ```
-XDG autostart → usb-auth-unlock-keyring.sh
+XDG autostart → pamusb-unlock-keyring.sh
   → wait for LUKS UUID to appear (30s timeout)
   → sudo cryptsetup luksOpen (NOPASSWD via sudoers)
   → sudo mount (NOPASSWD via sudoers)

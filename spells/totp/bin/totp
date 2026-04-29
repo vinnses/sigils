@@ -6,9 +6,11 @@
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 SPELL_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-TOTP_DATA_DIR="${SPELL_DIR}/data"
+TOTP_DATA_DIR="${TOTP_DATA_DIR:-${SPELL_DIR}/data}"
 TOTP_KEYS_FILE="${TOTP_DATA_DIR}/keys"          # legacy plaintext (migration only)
 TOTP_KEYS_FILE_ENC="${TOTP_DATA_DIR}/keys.enc"  # encrypted secrets
+TOTP_KEYS_FILE_GPG="${TOTP_DATA_DIR}/keys.gpg"  # encrypted secrets via gpg-agent
+TOTP_BACKEND_FILE="${TOTP_DATA_DIR}/backend"
 KEYRING_SERVICE="totp-spell"
 KEYRING_ACCOUNT="master"
 DEFAULT_ALGO="sha1"
@@ -20,6 +22,7 @@ DEFAULT_PERIOD=30
 _PASSPHRASE=""
 _KEYS_CONTENT=""
 _KEYS_LOADED=false
+_STORAGE_BACKEND=""
 
 # ─── Dependency check ─────────────────────────────────────────────────────────
 
@@ -33,10 +36,10 @@ _check_dependencies() {
         echo "  macOS:         brew install oath-toolkit" >&2
         return 1
     fi
-    if ! command -v openssl &>/dev/null; then
-        echo "Error: openssl not found. Install openssl." >&2
+    command -v openssl &>/dev/null || command -v gpg &>/dev/null || {
+        echo "Error: openssl or gpg is required for encrypted storage." >&2
         return 1
-    fi
+    }
 }
 
 _ensure_storage() {
@@ -72,6 +75,50 @@ _keyring_set() {
         account "$KEYRING_ACCOUNT" 2>/dev/null
 }
 
+# ─── Storage backend ──────────────────────────────────────────────────────────
+
+_normalize_backend() {
+    case "${1:-}" in
+        ""|passphrase|openssl) echo "passphrase" ;;
+        keyring)              echo "keyring" ;;
+        gpg|gpg-agent)        echo "gpg" ;;
+        *)
+            echo "Error: backend must be passphrase, keyring, or gpg" >&2
+            return 1
+            ;;
+    esac
+}
+
+_detect_backend() {
+    if [[ -n "$_STORAGE_BACKEND" ]]; then
+        echo "$_STORAGE_BACKEND"
+        return 0
+    fi
+
+    if [[ -f "$TOTP_BACKEND_FILE" ]]; then
+        _STORAGE_BACKEND="$(<"$TOTP_BACKEND_FILE")"
+    elif [[ -f "$TOTP_KEYS_FILE_GPG" ]]; then
+        _STORAGE_BACKEND="gpg"
+    elif [[ -f "$TOTP_KEYS_FILE_ENC" ]]; then
+        _STORAGE_BACKEND="passphrase"
+    else
+        _STORAGE_BACKEND="${INIT_BACKEND:-gpg}"
+    fi
+
+    _STORAGE_BACKEND="$(_normalize_backend "$_STORAGE_BACKEND")" || return 1
+    echo "$_STORAGE_BACKEND"
+}
+
+_set_backend() {
+    _STORAGE_BACKEND="$(_normalize_backend "$1")" || return 1
+}
+
+_write_backend() {
+    mkdir -p "$TOTP_DATA_DIR"
+    printf '%s\n' "$(_detect_backend)" > "$TOTP_BACKEND_FILE"
+    chmod 600 "$TOTP_BACKEND_FILE"
+}
+
 # ─── Passphrase ───────────────────────────────────────────────────────────────
 
 # Prompt via terminal. Pass confirm=true to require double-entry.
@@ -100,7 +147,7 @@ _prompt_passphrase() {
 # Populate $_PASSPHRASE: keyring first, then prompt. Cached for the invocation.
 _get_passphrase() {
     [[ -n "$_PASSPHRASE" ]] && return 0
-    if _keyring_available; then
+    if [[ "$(_detect_backend)" == "keyring" ]] && _keyring_available; then
         local kpass
         kpass=$(_keyring_get)
         if [[ -n "$kpass" ]]; then
@@ -124,6 +171,24 @@ _clear_passphrase() {
 # Load keys into $_KEYS_CONTENT. Handles encrypted, legacy plaintext, and empty.
 _load_keys() {
     $_KEYS_LOADED && return 0
+
+    local backend
+    backend="$(_detect_backend)" || return 1
+
+    if [[ "$backend" == "gpg" && -f "$TOTP_KEYS_FILE_GPG" ]]; then
+        if ! command -v gpg &>/dev/null; then
+            echo "Error: gpg not found. Install gnupg." >&2
+            return 1
+        fi
+        local decrypted
+        decrypted=$(gpg --quiet --decrypt --output - "$TOTP_KEYS_FILE_GPG" 2>/dev/null) || {
+            echo "Error: failed to decrypt keys with gpg-agent" >&2
+            return 1
+        }
+        _KEYS_CONTENT="$decrypted"
+        _KEYS_LOADED=true
+        return 0
+    fi
 
     if [[ ! -f "$TOTP_KEYS_FILE_ENC" ]]; then
         if [[ -f "$TOTP_KEYS_FILE" ]]; then
@@ -153,6 +218,34 @@ _load_keys() {
 # Encrypt $_KEYS_CONTENT and write atomically to keys.enc.
 _save_keys() {
     _ensure_storage
+    local backend
+    backend="$(_detect_backend)" || return 1
+
+    if [[ "$backend" == "gpg" ]]; then
+        if ! command -v gpg &>/dev/null; then
+            echo "Error: gpg not found. Install gnupg." >&2
+            return 1
+        fi
+        local tmpgpg
+        tmpgpg=$(mktemp -p "$TOTP_DATA_DIR" .keys.XXXXXX.gpg)
+        if ! printf '%s' "$_KEYS_CONTENT" \
+            | gpg --yes --symmetric --cipher-algo AES256 --output "$tmpgpg" - 2>/dev/null; then
+            rm -f "$tmpgpg"
+            echo "Error: failed to encrypt keys with gpg" >&2
+            return 1
+        fi
+        chmod 600 "$tmpgpg"
+        mv "$tmpgpg" "$TOTP_KEYS_FILE_GPG"
+        rm -f "$TOTP_KEYS_FILE_ENC"
+        _write_backend
+        return 0
+    fi
+
+    if ! command -v openssl &>/dev/null; then
+        echo "Error: openssl not found. Install openssl." >&2
+        return 1
+    fi
+    _get_passphrase || return 1
     local tmpfile
     tmpfile=$(mktemp -p "$TOTP_DATA_DIR" .keys.XXXXXX)
     printf '%s' "$_KEYS_CONTENT" \
@@ -165,11 +258,16 @@ _save_keys() {
     fi
     chmod 600 "$tmpfile"
     mv "$tmpfile" "$TOTP_KEYS_FILE_ENC"
+    rm -f "$TOTP_KEYS_FILE_GPG"
+    _write_backend
 }
 
 # Fail early for write operations when encrypted storage is not yet set up.
 _require_encrypted() {
     if [[ ! -f "$TOTP_KEYS_FILE_ENC" ]]; then
+        if [[ -f "$TOTP_KEYS_FILE_GPG" ]]; then
+            return 0
+        fi
         if [[ -f "$TOTP_KEYS_FILE" ]]; then
             echo "Error: unencrypted storage detected. Run 'totp init' to migrate." >&2
         else
@@ -308,22 +406,27 @@ _clip_read() {
 
 cmd_init() {
     _ensure_storage
+    local requested_backend
+    requested_backend="$(_normalize_backend "${INIT_BACKEND:-}")" || return 1
 
     # ── Re-key: existing encrypted storage ────────────────────────────────────
-    if [[ -f "$TOTP_KEYS_FILE_ENC" ]]; then
+    if [[ -f "$TOTP_KEYS_FILE_ENC" || -f "$TOTP_KEYS_FILE_GPG" ]]; then
         echo "Existing encrypted storage found." >&2
-        echo "Enter current passphrase to re-key." >&2
+        echo "Decrypting current storage before re-key." >&2
         _load_keys || return 1
-        local new_pass
-        new_pass=$(_prompt_passphrase true) || return 1
-        _PASSPHRASE="$new_pass"
+        _set_backend "$requested_backend" || return 1
+        if [[ "$requested_backend" != "gpg" ]]; then
+            local new_pass
+            new_pass=$(_prompt_passphrase true) || return 1
+            _PASSPHRASE="$new_pass"
+        fi
         _save_keys || return 1
-        if _keyring_available; then
+        if [[ "$requested_backend" == "keyring" ]] && _keyring_available; then
             _keyring_set "$new_pass" \
                 && echo "Passphrase updated in GNOME Keyring." >&2 \
                 || echo "Warning: failed to update keyring entry." >&2
         fi
-        echo "Re-key complete." >&2
+        echo "Re-key complete (${requested_backend})." >&2
         return 0
     fi
 
@@ -336,22 +439,24 @@ cmd_init() {
     fi
 
     # ── Fresh install ─────────────────────────────────────────────────────────
-    local new_pass
-    new_pass=$(_prompt_passphrase true) || return 1
-    _PASSPHRASE="$new_pass"
+    _set_backend "$requested_backend" || return 1
+    if [[ "$requested_backend" != "gpg" ]]; then
+        local new_pass
+        new_pass=$(_prompt_passphrase true) || return 1
+        _PASSPHRASE="$new_pass"
+    fi
     _save_keys || return 1
 
-    if _keyring_available; then
+    if [[ "$requested_backend" == "keyring" ]] && _keyring_available; then
         if _keyring_set "$new_pass"; then
             echo "Passphrase stored in GNOME Keyring." >&2
         else
             echo "Warning: failed to store passphrase in keyring. You will be prompted on each use." >&2
         fi
+    elif [[ "$requested_backend" == "gpg" ]]; then
+        echo "Encryption initialized with gpg-agent." >&2
     else
-        echo "GNOME Keyring not available — passphrase will be prompted on each use." >&2
-        if ! command -v secret-tool &>/dev/null; then
-            echo "  Install libsecret-tools (Debian/Ubuntu) or libsecret (Arch) for keyring support." >&2
-        fi
+        echo "Encryption initialized with passphrase prompts." >&2
     fi
 
     if [[ -f "$TOTP_KEYS_FILE" ]]; then
@@ -379,7 +484,7 @@ cmd_add() {
         IFS=$'\t' read -r name secret algo digits period <<< "$parsed"
     fi
 
-    if $USE_CLIP && [[ -z "$secret" ]] && [[ -z "$ADD_URI" ]]; then
+    if $USE_XCLIP && [[ -z "$secret" ]] && [[ -z "$ADD_URI" ]]; then
         secret=$(_clip_read) || return 1
         secret="${secret%"${secret##*[![:space:]]}"}"
         secret="${secret#"${secret%%[![:space:]]*}"}"
@@ -392,7 +497,7 @@ cmd_add() {
     fi
 
     if [[ -z "$secret" ]]; then
-        echo "Error: specify --secret <base32>, --uri <otpauth://...>, or --clip" >&2
+        echo "Error: specify --secret <base32>, --uri <otpauth://...>, or --xclip" >&2
         return 1
     fi
 
@@ -473,14 +578,32 @@ cmd_get() {
     _ensure_storage
     _load_keys || return 1
 
+    if $GET_ALL; then
+        while IFS=$'\t' read -r name secret algo digits period; do
+            [[ -n "$name" ]] || continue
+            _print_code "$name" "$secret" "$algo" "$digits" "$period"
+        done <<< "$_KEYS_CONTENT"
+        return 0
+    fi
+
     local line
     line=$(_resolve_account "$SEL_NAME") || return 1
 
     local name secret algo digits period
     IFS=$'\t' read -r name secret algo digits period <<< "$line"
 
+    _print_code "$name" "$secret" "$algo" "$digits" "$period"
+}
+
+_generate_code() {
+    local secret="$1" algo="$2" digits="$3" period="$4"
+    oathtool --totp="$algo" --base32 --digits="$digits" --time-step-size="${period}s" "$secret"
+}
+
+_print_code() {
+    local name="$1" secret="$2" algo="$3" digits="$4" period="$5"
     local code
-    code=$(oathtool --totp="$algo" --base32 --digits="$digits" --time-step-size="${period}s" "$secret")
+    code=$(_generate_code "$secret" "$algo" "$digits" "$period")
     if [[ $? -ne 0 ]]; then
         echo "Error: failed to generate code" >&2
         return 1
@@ -497,11 +620,31 @@ cmd_get() {
     echo "  code:      $formatted"
     echo "  expires:   ${remaining}s"
 
-    if $USE_CLIP; then
+    if $USE_XCLIP; then
         if _clip_copy "$code"; then
             echo "  clipboard: copied" >&2
         fi
     fi
+}
+
+cmd_copy() {
+    _ensure_storage
+    _load_keys || return 1
+
+    local line
+    line=$(_resolve_account "$SEL_NAME") || return 1
+
+    local name secret algo digits period
+    IFS=$'\t' read -r name secret algo digits period <<< "$line"
+
+    local code
+    code=$(_generate_code "$secret" "$algo" "$digits" "$period") || {
+        echo "Error: failed to generate code" >&2
+        return 1
+    }
+
+    _clip_copy "$code" || return 1
+    echo "Copied: $name" >&2
 }
 
 cmd_remove() {
@@ -549,46 +692,52 @@ usage() {
 Usage: totp <command> [options]
 
 Commands:
-  init                   Initialize encrypted storage (run once, or to re-key)
-  add                    Add a new TOTP account
-  list                   List stored accounts
-  get     [options]      Generate current TOTP code
-  remove  --name <name>  Remove an account
-  export  [options]      Show otpauth:// URI for account
+  init                   Initialize encrypted storage (default: gpg-agent)
+  add     <name>         Add a new TOTP account
+  list|ls                List stored accounts without revealing codes
+  get     [name]         Generate current TOTP code
+  copy|cp <name>         Copy current TOTP code to clipboard
+  remove|rm <name>       Remove an account
+  export  [name]         Show otpauth:// URI for account
 
 Add options:
-  --name   <label>       Account label (e.g. "github", "AWS:user@example.com")
+  --name   <label>       Account label (legacy form)
   --secret <base32>      Base32-encoded secret key
   --uri    <otpauth://...>  Import from otpauth URI (overrides --name/--secret)
-  --clip                 Read secret from clipboard (add only)
+  --xclip, --clip        Read secret from clipboard (add only)
   --algo   <algorithm>   Hash algorithm: sha1, sha256, sha512 (default: sha1)
   --digits <n>           Code length: 6, 7, or 8 (default: 6)
   --period <seconds>     Time step in seconds (default: 30)
 
 Get/export options:
-  --name <label>         Select account by name (auto-selects if single account)
-  --clip                 Copy code to clipboard (get only)
+  --name <label>         Select account by name (legacy form)
+  --all                  Reveal codes for all accounts (get only)
+  --xclip, --clip        Copy code to clipboard (get only)
+
+Init options:
+  --backend <backend>    passphrase, keyring, or gpg (default: gpg)
 
 General:
   -h, --help             Show this help
 
 Examples:
   totp init
-  totp add --name github --secret JBSWY3DPEHPK3PXP
-  totp add --name github --clip
+  totp add github --secret JBSWY3DPEHPK3PXP
+  totp add github --xclip
   totp add --uri "otpauth://totp/GitHub:user?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
-  totp list
-  totp get
-  totp get --name github
-  totp get --name github --clip
-  totp export --name github
-  totp remove --name github
+  totp ls
+  totp get github
+  totp copy github
+  totp get --all
+  totp export github
+  totp rm github
 
 Dependencies:
   oathtool (oath-toolkit)  — TOTP code generation (required)
   openssl                  — AES-256 encryption (required)
-  secret-tool (libsecret)  — GNOME Keyring integration (optional)
-  xclip | wl-copy | xsel  — clipboard support (optional, for --clip)
+  gpg (gnupg)              — gpg-agent backed encryption (recommended)
+  secret-tool (libsecret)  — GNOME Keyring integration (optional legacy backend)
+  xclip | wl-copy | xsel  — clipboard support (optional, for --xclip)
 EOF
 }
 
@@ -604,12 +753,20 @@ ADD_URI=""
 ADD_ALGO="$DEFAULT_ALGO"
 ADD_DIGITS="$DEFAULT_DIGITS"
 ADD_PERIOD="$DEFAULT_PERIOD"
-USE_CLIP=false
+USE_XCLIP=false
+GET_ALL=false
+INIT_BACKEND="${TOTP_INIT_BACKEND:-gpg}"
 
 case "$1" in
-    init|add|list|get|remove|export) COMMAND="$1"; shift ;;
+    init|add|get|copy|cp|export) COMMAND="$1"; shift ;;
+    list|ls)                     COMMAND="list"; shift ;;
+    remove|rm)                   COMMAND="remove"; shift ;;
     -h|--help)                        usage; exit 0 ;;
-    *)                                echo "Unknown command: $1" >&2; usage; exit 1 ;;
+    *)
+        COMMAND="get"
+        SEL_NAME="$1"
+        shift
+        ;;
 esac
 
 while [[ $# -gt 0 ]]; do
@@ -620,9 +777,25 @@ while [[ $# -gt 0 ]]; do
         --algo)    shift; ADD_ALGO="$1" ;;
         --digits)  shift; ADD_DIGITS="$1" ;;
         --period)  shift; ADD_PERIOD="$1" ;;
-        --clip)    USE_CLIP=true ;;
+        --backend) shift; INIT_BACKEND="$1" ;;
+        --all)     GET_ALL=true ;;
+        --xclip|--clip) USE_XCLIP=true ;;
         -h|--help) usage; exit 0 ;;
-        *)         echo "Unknown option: $1" >&2; usage; exit 1 ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+        *)
+            if [[ -z "$SEL_NAME" && -z "$ADD_NAME" ]]; then
+                SEL_NAME="$1"
+                ADD_NAME="$1"
+            else
+                echo "Unexpected argument: $1" >&2
+                usage
+                exit 1
+            fi
+            ;;
     esac
     shift
 done
@@ -631,13 +804,16 @@ done
 
 _check_dependencies || exit 1
 
+STATUS=0
 case "$COMMAND" in
-    init)   cmd_init ;;
-    add)    cmd_add ;;
-    list)   cmd_list ;;
-    get)    cmd_get ;;
-    remove) cmd_remove ;;
-    export) cmd_export ;;
+    init)   cmd_init || STATUS=$? ;;
+    add)    cmd_add || STATUS=$? ;;
+    list)   cmd_list || STATUS=$? ;;
+    get)    cmd_get || STATUS=$? ;;
+    copy|cp) cmd_copy || STATUS=$? ;;
+    remove) cmd_remove || STATUS=$? ;;
+    export) cmd_export || STATUS=$? ;;
 esac
 
 _clear_passphrase
+exit "$STATUS"

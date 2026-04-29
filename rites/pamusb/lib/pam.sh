@@ -115,8 +115,8 @@ pam_configure_file() {
     fi
 
     # Create backup
-    cp "$pam_file" "${pam_file}.usb-auth.bak"
-    log_info "Backup saved to ${pam_file}.usb-auth.bak"
+    cp "$pam_file" "${pam_file}.pamusb.bak"
+    log_info "Backup saved to ${pam_file}.pamusb.bak"
 
     # Insert line at top (before any existing auth lines)
     local tmp
@@ -170,8 +170,8 @@ pam_revert_files() {
     for pam_file in "${target_files[@]}"; do
         [[ ! -f "$pam_file" ]] && continue
 
-        if [[ -f "${pam_file}.usb-auth.bak" ]]; then
-            mv "${pam_file}.usb-auth.bak" "$pam_file"
+        if [[ -f "${pam_file}.pamusb.bak" ]]; then
+            mv "${pam_file}.pamusb.bak" "$pam_file"
             print_ok "Restored $pam_file from backup"
         else
             # Remove pam_usb line manually
@@ -185,7 +185,7 @@ pam_revert_files() {
 
 pam_install_guard() {
     local username="$1"
-    local main_uuid="$2"
+    local match_id="$2"
     local template_dir="${SPELL_DIR}/templates"
     local dest="/usr/local/bin/usb-pam-guard.sh"
 
@@ -194,7 +194,7 @@ pam_install_guard() {
     local content
     content=$(sed \
         -e "s|{{USERNAME}}|${username}|g" \
-        -e "s|{{MAIN_UUID}}|${main_uuid}|g" \
+        -e "s|{{MATCH_ID}}|${match_id}|g" \
         "${template_dir}/guard.sh")
 
     printf '%s\n' "$content" > "$dest"
@@ -220,15 +220,19 @@ pam_install_dispatch() {
 }
 
 pam_install_udev_lock_rule() {
-    local main_uuid="$1"
+    local match_kind="$1"
+    local match_value="$2"
     local template_dir="${SPELL_DIR}/templates"
     local dest="/etc/udev/rules.d/90-usb-lock.rules"
+    local match_env
+    match_env="$(usb_match_env_name "$match_kind")" || return 1
 
     log_info "Installing udev lock rule to $dest"
 
     local content
     content=$(sed \
-        -e "s|{{MAIN_UUID}}|${main_uuid}|g" \
+        -e "s|MATCH_ENV|${match_env}|g" \
+        -e "s|{{MATCH_VALUE}}|${match_value}|g" \
         "${template_dir}/udev-lock.rules")
 
     printf '%s\n' "$content" > "$dest"

@@ -9,72 +9,77 @@ Generate RFC 6238 time-based one-time passwords from the command line.
 make -C spells/totp install
 ```
 
-Detects the distro automatically and installs `oathtool`, `openssl`, and `xclip`.
+Detects the distro automatically and installs the basic TOTP and clipboard tools.
 
 ### Dependencies
 
 | Tool | Purpose | Required |
 |------|---------|----------|
 | `oathtool` (oath-toolkit) | TOTP code generation | yes |
-| `openssl` | AES-256 encryption of secrets | yes |
-| `secret-tool` (libsecret-tools) | GNOME Keyring integration | optional |
-| `xclip` \| `wl-copy` \| `xsel` | Clipboard support (`--clip`) | optional |
+| `gpg` (gnupg) | Recommended encrypted storage via `gpg-agent` | yes |
+| `openssl` | Legacy passphrase/keyring encrypted storage | optional |
+| `secret-tool` (libsecret-tools) | GNOME Keyring backend | optional legacy |
+| `xclip` \| `wl-copy` \| `xsel` | Clipboard support (`--xclip`) | optional |
 
 ## First-time setup
 
-Run `totp init` before adding any accounts. This sets up the encrypted storage
-and (if GNOME Keyring is available) stores the master passphrase in the keyring
-so future invocations unlock automatically.
+Run `totp init` before adding any accounts. The default backend is `gpg`, which
+uses `gpg-agent` for prompting and cache TTLs without depending on GNOME.
 
 ```
-totp init
+totp init --backend gpg
 ```
 
 ## Usage
 
 ```
-totp add --name github --secret JBSWY3DPEHPK3PXP
-totp add --name github --clip                        # read secret from clipboard
+totp add github --secret JBSWY3DPEHPK3PXP
+totp add github --xclip                              # read secret from clipboard
 totp add --uri "otpauth://totp/GitHub:user?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
-totp list
-totp get
-totp get --name github
-totp get --name github --clip                        # copy code to clipboard
-totp export --name github
-totp remove --name github
+totp ls
+totp get github
+totp github
+totp copy github
+totp get github --xclip                              # print and copy code
+totp get --all                                       # reveal all current codes
+totp export github
+totp rm github
 ```
 
 ## Security
 
 ### Encryption at rest
 
-Secrets are encrypted with **AES-256-CBC + PBKDF2** (600 000 iterations) via
-`openssl enc`. The ciphertext is stored in `spells/totp/data/keys.enc`.
-The plaintext never touches disk after initialization.
+The recommended backend encrypts secrets with `gpg --symmetric` and stores the
+ciphertext in `spells/totp/data/keys.gpg`. `gpg-agent` handles prompting and
+cache TTLs, so this works across desktop environments, window managers, TTYs,
+and SSH sessions when GPG is configured.
 
-### Passphrase management — two tiers
+The legacy `passphrase` and `keyring` backends use **AES-256-CBC + PBKDF2**
+(600 000 iterations) via `openssl enc` and store ciphertext at
+`spells/totp/data/keys.enc`.
 
-1. **Graphical session (GNOME Keyring available):** The master passphrase is
-   stored in GNOME Keyring via `secret-tool` and retrieved transparently on
-   each invocation. No prompt required.
+### Passphrase Management
 
-2. **TTY / headless session (no D-Bus or keyring):** The master passphrase is
-   prompted interactively from the terminal (`TOTP passphrase:`). There is no
-   silent fallback — the secrets are inaccessible without the passphrase.
+Recommended:
 
-Detection logic: `secret-tool` must be in PATH **and** either
-`$DBUS_SESSION_BUS_ADDRESS` is set or `/run/user/$UID/bus` socket exists.
+- `totp init --backend gpg`: uses `gpg-agent`; no GNOME Keyring dependency.
+
+Compatibility:
+
+- `totp init --backend passphrase`: prompts for the master passphrase.
+- `totp init --backend keyring`: stores that passphrase with `secret-tool`.
 
 ### Re-keying
 
-Run `totp init` again at any time to change the master passphrase. The current
-passphrase (from keyring or prompt) is required to decrypt existing accounts
-before re-encrypting with the new one.
+Run `totp init --backend <backend>` again at any time to migrate or re-key.
+The current backend must decrypt existing accounts before the new backend is
+written.
 
 ### Other protections
 
 - `data/` directory: permissions `700` (owner access only)
-- `data/keys.enc`: permissions `600` (owner read/write only)
+- `data/keys.gpg` or `data/keys.enc`: permissions `600` (owner read/write only)
 - Permissions auto-corrected on every invocation
 - Secrets never committed to git (`spells/*/data/*` is in `.gitignore`)
 - Passphrase variable overwritten with zeros before script exit (best-effort)
