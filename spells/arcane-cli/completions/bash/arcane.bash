@@ -59,9 +59,6 @@ _arcane() {
     local device_dir="$arcane_dir/$device"
     local projects=()
     if [[ -d "$device_dir" ]]; then
-        if [[ -f "$device_dir/compose.yaml" ]]; then
-            projects+=("$device")
-        fi
         local entry
         for entry in "$device_dir"/*/; do
             [[ -d "$entry" ]] || continue
@@ -77,11 +74,7 @@ _arcane() {
         local project
         for project in "${projects[@]}"; do
             local compose_path
-            if [[ "$project" == "$device" && -f "$device_dir/compose.yaml" ]]; then
-                compose_path="$device_dir/compose.yaml"
-            else
-                compose_path="$device_dir/$project/compose.yaml"
-            fi
+            compose_path="$device_dir/$project/compose.yaml"
             [[ -f "$compose_path" ]] || continue
             while IFS= read -r service; do
                 [[ -n "$service" ]] || continue
@@ -120,9 +113,7 @@ _arcane() {
         esac
     done
     if [[ -n "$selected_project" ]]; then
-        if [[ "$selected_project" == "$device" && -f "$device_dir/compose.yaml" ]]; then
-            selected_project_path="$device_dir"
-        elif [[ -f "$device_dir/$selected_project/compose.yaml" ]]; then
+        if [[ -f "$device_dir/$selected_project/compose.yaml" ]]; then
             selected_project_path="$device_dir/$selected_project"
         fi
     fi

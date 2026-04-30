@@ -80,6 +80,12 @@ make_fixture() {
            "$FIXTURE_DIR/arcane/testbox/beta"
   : >"$ARCANE_TEST_LOG"
 
+  cat >"$FIXTURE_DIR/arcane/testbox/compose.yaml" <<'EOF'
+services:
+  api:
+    image: ghcr.io/example/device-root:latest
+EOF
+
   cat >"$FIXTURE_DIR/arcane/testbox/web/compose.yaml" <<'EOF'
 services:
   api:
@@ -255,7 +261,7 @@ main() {
 
   run_cmd "$ARCANE_BIN" exec -d testbox api -- echo hello
   assert_status "$CMD_STATUS" "0" "exec resolves a unique service without requiring a project"
-  assert_contains "$(cat "$ARCANE_TEST_LOG")" "compose exec api echo hello" "exec forwards the service command with '--'"
+  assert_contains "$(cat "$ARCANE_TEST_LOG")" "$FIXTURE_DIR/arcane/testbox/web|compose exec api echo hello" "exec ignores device-root compose.yaml when resolving services"
 
   run_cmd "$ARCANE_BIN" exec -d testbox api echo hello
   assert_status "$CMD_STATUS" "1" "exec requires the separator before the command"
@@ -306,6 +312,14 @@ main() {
   run_cmd "$ARCANE_BIN" list -d testbox
   assert_status "$CMD_STATUS" "0" "list replaces ls"
   assert_contains "$CMD_OUTPUT" "web" "list prints discovered projects"
+  if grep -Fq "testbox" <<<"$CMD_OUTPUT"; then
+    TEST_COUNT=$((TEST_COUNT + 1))
+    printf '  list unexpectedly included device root as project: %s\n' "$CMD_OUTPUT"
+    fail "list does not treat the device root as a project"
+  else
+    TEST_COUNT=$((TEST_COUNT + 1))
+    pass "list does not treat the device root as a project"
+  fi
 
   run_cmd "$ARCANE_BIN" list -d testbox web
   assert_status "$CMD_STATUS" "0" "list reports project resources when a project is selected"

@@ -67,10 +67,6 @@ _arcane_discover() {
         return 1
     fi
 
-    if [[ -f "$device_dir/compose.yaml" ]]; then
-        printf '%s\t%s\n' "$device" "$device_dir"
-    fi
-
     local entry
     for entry in "$device_dir"/*/; do
         [[ -d "$entry" ]] || continue
