@@ -10,39 +10,42 @@ _arcane_usage() {
 Usage:
   arcane <subcommand> [projects...] [--exclude|-e excludes...] [--device|-d device]
   arcane exec [--device|-d device] [--project|-p project] <service> -- <command...>
-  arcane bash [--device|-d device] [--project|-p project] <service>
-  arcane rm <containers|images|networks|volumes|all> [projects...] [--exclude|-e excludes...] [--device|-d device]
+  arcane list [--device|-d device] [project [containers|images|networks|volumes|all]]
+  arcane remove [--device|-d device] [--force|-f] <project> <containers|images|networks|volumes|all>[,<type>...] [names...]
+  arcane dump [--only-env|--volumes] [--device|-d device] [--output|-o path] [projects...]
+  arcane restore <archive.7z> [--force|-f]
 
 Subcommands:
   up         Start services (docker compose up -d)
   down       Stop services (docker compose down)
   pull       Pull images and restart (pull + up -d)
   restart    Full restart (down + pull + up -d)
-  clean      Legacy cleanup shortcut (down --rmi all)
-  purge      Legacy cleanup shortcut with volumes (down --rmi all --volumes)
-  status     Show service status (docker compose ps)
-  ls         List projects on device (optionally only up or down)
-  cd         Shell helper when sourced; otherwise prints the project path
-  path       Print the absolute path for one project
+  clean      Stop services and remove images for selected projects
+  purge      Stop services and remove images and volumes for selected projects
+  ps         Show compose service status (docker compose ps)
+  list       List projects, or list containers/images/networks/volumes for one project
   exec       Run a command inside one service, resolving the project by service name when unique
-  bash       Open bash in one service, resolving the project by service name when unique
-  resources  Show containers, images, networks, and volumes tied to projects
-  rm         Remove one resource type for the selected projects
-  favorites  Generate one portable bookmarks HTML with nginx URLs grouped by device/project
-  dump       Backup all .env files to encrypted 7z archive
-  restore    Restore .env files from 7z archive
+  remove     Remove project containers, images, networks, volumes, or all resources (rm also works)
+  archive    Move an active project to archived/<device>/<project>
+  unarchive  Restore a project from archived/<device>/<project>
+  clone      Copy a project from one device to another
+  nginx-urls Generate one portable bookmarks HTML with nginx URLs grouped by device/project
+  dump       Backup environment files, optionally including Docker volumes
+  restore    Restore environment files and volumes from 7z archive
 
 Notes:
   - 'run' has been removed. Use lifecycle commands for project-wide actions.
-  - For shell navigation, source init/env.bash and use: arcane cd <project>
-  - Non-interactive path lookup remains available via: arcane path <project>
+  - Use 'arcane exec <service> -- bash' instead of the removed bash shortcut.
 
 Options:
   -d, --device <name>     Target device (default: hostname)
   -e, --exclude <names>   Exclude projects from batch operation
-  -o, --output <path>     Output path for favorites (only with favorites)
-      --up                Only for ls: show running projects
-      --down              Only for ls: show stopped projects
+  -f, --force             Only for remove/rm: force container/image removal
+                          Only for restore: overwrite files and recreate volumes
+  -o, --output <path>     Output path for nginx-urls
+      --up                Only for list: show running projects
+      --down              Only for list: show stopped projects
+      --archived          Only for list: show archived projects
 
 Environment:
   ARCANE_DIR   Arcane repository path (default: ~/arcane)
@@ -74,15 +77,16 @@ case "${1:-}" in
         shift
         _arcane_each "docker compose down --rmi all --volumes" "$@"
         ;;
-    status)
+    ps)
         shift
         _arcane_each "docker compose ps" "$@"
         ;;
-    ls)
+    list)
         shift
         ls_mode="all"
         seen_up=false
         seen_down=false
+        seen_archived=false
         ls_args=()
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -96,6 +100,10 @@ case "${1:-}" in
                     ls_mode="down"
                     shift
                     ;;
+                --archived)
+                    seen_archived=true
+                    shift
+                    ;;
                 *)
                     ls_args+=("$1")
                     shift
@@ -106,41 +114,47 @@ case "${1:-}" in
             echo "error: choose only one of --up or --down" >&2
             exit 1
         fi
-        _arcane_ls "$ls_mode" "${ls_args[@]}"
-        ;;
-    cd|path)
-        shift
-        _arcane_path "$@"
+        if $seen_archived; then
+            if $seen_up || $seen_down; then
+                echo "error: --archived cannot be combined with --up or --down" >&2
+                exit 1
+            fi
+            _arcane_ls_archived "${ls_args[@]}"
+        else
+            _arcane_ls "$ls_mode" "${ls_args[@]}"
+        fi
         ;;
     exec)
         shift
         _arcane_exec "$@"
         ;;
-    bash)
+    remove|rm)
         shift
-        _arcane_bash "$@"
+        _arcane_remove "$@"
         ;;
-    resources)
+    archive)
         shift
-        _arcane_resources "$@"
+        _arcane_archive "$@"
         ;;
-    rm)
+    unarchive)
         shift
-        [[ $# -gt 0 ]] || { echo "error: rm requires a resource type" >&2; exit 1; }
-        resource_type="$1"
+        _arcane_unarchive "$@"
+        ;;
+    clone)
         shift
-        _arcane_rm "$resource_type" "$@"
+        _arcane_clone "$@"
         ;;
     run)
         echo "error: run has been removed. Use 'arcane exec <service> -- <command...>' or a lifecycle subcommand." >&2
         exit 1
         ;;
-    favorites)
+    nginx-urls)
         shift
-        _arcane_favorites "$@"
+        _arcane_nginx_urls "$@"
         ;;
     dump)
-        _arcane_dump
+        shift
+        _arcane_dump "$@"
         ;;
     restore)
         shift
@@ -148,7 +162,7 @@ case "${1:-}" in
             echo "error: restore requires an archive path" >&2
             exit 1
         fi
-        _arcane_restore "$1"
+        _arcane_restore "$@"
         ;;
     --help|-h|help)
         _arcane_usage
